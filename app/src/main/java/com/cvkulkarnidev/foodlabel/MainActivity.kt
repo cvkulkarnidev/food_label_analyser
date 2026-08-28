@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,13 +30,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -44,8 +48,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -72,6 +78,7 @@ import coil3.compose.AsyncImage
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
 import com.cvkulkarnidev.foodlabel.model.LabelReport
 import com.cvkulkarnidev.foodlabel.model.NutritionFacts
+import com.cvkulkarnidev.foodlabel.model.ProductCategory
 import com.cvkulkarnidev.foodlabel.model.ScoreFactor
 import com.cvkulkarnidev.foodlabel.ocr.OnDeviceOcr
 import com.cvkulkarnidev.foodlabel.ui.theme.Amber
@@ -105,7 +112,7 @@ class MainActivity : ComponentActivity() {
 
 private sealed interface ScreenState {
     data object Home : ScreenState
-    data class Reading(val imageUri: Uri) : ScreenState
+    data class Reading(val imageUri: Uri, val category: ProductCategory) : ScreenState
     data class Result(val imageUri: Uri, val report: LabelReport) : ScreenState
     data class Error(val imageUri: Uri?, val message: String) : ScreenState
 }
@@ -116,9 +123,10 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     val scope = rememberCoroutineScope()
     var state: ScreenState by remember { mutableStateOf(ScreenState.Home) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var selectedCategory by rememberSaveable { mutableStateOf<ProductCategory?>(null) }
 
-    fun analyze(uri: Uri) {
-        state = ScreenState.Reading(uri)
+    fun analyze(uri: Uri, category: ProductCategory) {
+        state = ScreenState.Reading(uri, category)
         scope.launch {
             try {
                 val rawText = OnDeviceOcr.read(context, uri)
@@ -127,7 +135,7 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                     return@launch
                 }
                 val report = withContext(Dispatchers.Default) {
-                    ProductLabelAnalyzer.analyze(rawText)
+                    ProductLabelAnalyzer.analyze(rawText, category)
                 }
                 state = ScreenState.Result(uri, report)
             } catch (error: Exception) {
@@ -137,11 +145,11 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) analyze(uri)
+        if (uri != null) selectedCategory?.let { analyze(uri, it) }
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = pendingCameraUri
-        if (saved && uri != null) analyze(uri)
+        if (saved && uri != null) selectedCategory?.let { analyze(uri, it) }
     }
 
     fun openCamera() {
@@ -157,12 +165,15 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
         when (val current = state) {
             ScreenState.Home -> HomeScreen(
                 modifier = Modifier.padding(padding),
+                selectedCategory = selectedCategory,
+                onCategorySelected = { selectedCategory = it },
                 onCapture = ::openCamera,
                 onUpload = { galleryLauncher.launch("image/*") },
             )
             is ScreenState.Reading -> ReadingScreen(
                 modifier = Modifier.padding(padding),
                 uri = current.imageUri,
+                category = current.category,
                 onBack = { state = ScreenState.Home },
             )
             is ScreenState.Result -> ResultScreen(
@@ -188,6 +199,8 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
 @Composable
 private fun HomeScreen(
     modifier: Modifier = Modifier,
+    selectedCategory: ProductCategory?,
+    onCategorySelected: (ProductCategory) -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
@@ -239,11 +252,13 @@ private fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text("Analyze a label", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            CategorySelector(selectedCategory, onCategorySelected)
             ActionCard(
                 title = "Capture label",
                 subtitle = "Take a clear photo of the ingredients and nutrition panel",
                 icon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
                 primary = true,
+                enabled = selectedCategory != null,
                 onClick = onCapture,
             )
             ActionCard(
@@ -251,8 +266,18 @@ private fun HomeScreen(
                 subtitle = "Choose an existing label photo from your device",
                 icon = { Icon(Icons.Outlined.PhotoLibrary, contentDescription = null) },
                 primary = false,
+                enabled = selectedCategory != null,
                 onClick = onUpload,
             )
+
+            if (selectedCategory == null) {
+                Text(
+                    "Select a product category to enable capture and upload.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Rose,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
 
             Card(
                 colors = CardDefaults.cardColors(containerColor = SoftGreen.copy(alpha = 0.75f)),
@@ -283,18 +308,95 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun CategorySelector(
+    selectedCategory: ProductCategory?,
+    onCategorySelected: (ProductCategory) -> Unit,
+) {
+    var dialogOpen by rememberSaveable { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = { dialogOpen = true },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(62.dp),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Icon(Icons.Outlined.Category, contentDescription = null, tint = Forest)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            Text(
+                "PRODUCT CATEGORY",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            )
+            Text(
+                selectedCategory?.label ?: "Select a category",
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null)
+    }
+    Text(
+        "The selected category is used to compare this product only with similar foods.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.58f),
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
+
+    if (dialogOpen) {
+        AlertDialog(
+            onDismissRequest = { dialogOpen = false },
+            title = { Text("Choose product category", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    ProductCategory.entries.forEach { category ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    onCategorySelected(category)
+                                    dialogOpen = false
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = selectedCategory == category,
+                                onClick = null,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(category.label, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+    }
+}
+
+@Composable
 private fun ActionCard(
     title: String,
     subtitle: String,
     icon: @Composable () -> Unit,
     primary: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     Card(
         onClick = onClick,
+        enabled = enabled,
         colors = CardDefaults.cardColors(
             containerColor = if (primary) Forest else MaterialTheme.colorScheme.surface,
             contentColor = if (primary) Color.White else MaterialTheme.colorScheme.onSurface,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.42f),
         ),
         shape = RoundedCornerShape(24.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = if (primary) 0.dp else 2.dp),
@@ -328,7 +430,7 @@ private fun LocalContentMuted(primary: Boolean): Color =
     if (primary) Color.White.copy(alpha = 0.72f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
 
 @Composable
-private fun ReadingScreen(modifier: Modifier, uri: Uri, onBack: () -> Unit) {
+private fun ReadingScreen(modifier: Modifier, uri: Uri, category: ProductCategory, onBack: () -> Unit) {
     Column(modifier.fillMaxSize()) {
         SimpleTopBar("Reading your label", onBack)
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -355,6 +457,8 @@ private fun ReadingScreen(modifier: Modifier, uri: Uri, onBack: () -> Unit) {
                 Spacer(Modifier.height(28.dp))
                 Text("Extracting nutrition and ingredients…", fontSize = 19.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(8.dp))
+                Text(category.label, color = Sage, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
                 Text("Everything is processed on this device.", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f))
             }
         }
@@ -382,6 +486,7 @@ private fun ResultScreen(
             Spacer(Modifier.height(2.dp))
             ProductHeader(uri, report)
             ScoreCard(report)
+            PeerComparisonCard(report)
             FactorSection(report.factors)
             NutritionSection(report)
             IngredientsSection(report)
@@ -395,6 +500,64 @@ private fun ResultScreen(
                 modifier = Modifier.padding(horizontal = 14.dp),
             )
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun PeerComparisonCard(report: LabelReport) {
+    val comparison = report.peerComparison
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(22.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(Modifier.padding(18.dp)) {
+            Text("Compared with similar products", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("${comparison.percentile}%", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, color = Forest)
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "CATEGORY PERCENTILE",
+                    modifier = Modifier.padding(bottom = 5.dp),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.67f),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = { comparison.percentile / 100f },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(9.dp)
+                    .clip(CircleShape),
+                color = Forest,
+                trackColor = SoftGreen,
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(comparison.position, fontWeight = FontWeight.Bold, color = Sage)
+            Text(
+                "Based on ${comparison.peerCount} valid ${report.category.label.lowercase()} rows from an 852-product India-market dataset.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            )
+            if (comparison.isSmallSample) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Small peer set: treat this category rank as directional.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Rose,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "A high rank inside a treat category does not replace the absolute health score above.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            )
         }
     }
 }

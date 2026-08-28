@@ -103,12 +103,14 @@ internal object LabelTextParser {
     private fun detectCategory(lines: List<String>, ingredients: String?): ProductCategory {
         val text = (lines.take(12).joinToString(" ") + " " + ingredients.orEmpty()).lowercase()
         return when {
-            listOf("juice", "drink", "beverage", "soda", "cola", "energy drink", "water").any(text::contains) -> ProductCategory.BEVERAGE
-            listOf("milk", "yogurt", "yoghurt", "curd", "paneer", "cheese").any(text::contains) -> ProductCategory.DAIRY
-            listOf("cereal", "oats", "muesli", "granola", "corn flakes", "poha").any(text::contains) -> ProductCategory.CEREAL
-            listOf("chips", "namkeen", "biscuit", "cookie", "cracker", "snack").any(text::contains) -> ProductCategory.SNACK
-            listOf("sauce", "ketchup", "spread", "mayonnaise", "chutney").any(text::contains) -> ProductCategory.SAUCE_OR_SPREAD
-            else -> ProductCategory.GENERAL
+            listOf("juice", "drink", "beverage", "soda", "cola", "energy drink", "water").any(text::contains) -> ProductCategory.BEVERAGES_AND_JUICES
+            listOf("ice cream", "icecream", "kulfi", "frozen dessert").any(text::contains) -> ProductCategory.ICE_CREAM_AND_DESSERTS
+            listOf("milk", "yogurt", "yoghurt", "curd", "paneer", "cheese").any(text::contains) -> ProductCategory.DAIRY_AND_YOGURT
+            listOf("chocolate", "candy", "toffee", "laddu", "ladoo", "burfi", "sweet").any(text::contains) -> ProductCategory.CHOCOLATE_AND_SWEETS
+            listOf("sauce", "ketchup", "spread", "mayonnaise", "chutney", "pickle").any(text::contains) -> ProductCategory.SAUCES_AND_SPREADS
+            listOf("chips", "namkeen", "mixture", "makhana", "cracker", "savoury", "savory", "snack").any(text::contains) -> ProductCategory.SAVOURY_SNACKS
+            listOf("biscuit", "cookie", "cake", "wafer", "waffle", "rusk", "bread").any(text::contains) -> ProductCategory.BISCUITS_AND_BAKERY
+            else -> ProductCategory.INSTANT_AND_READY_FOODS
         }
     }
 

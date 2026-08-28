@@ -1,6 +1,7 @@
 package com.cvkulkarnidev.foodlabel.analysis
 
 import com.cvkulkarnidev.foodlabel.model.NutritionBasis
+import com.cvkulkarnidev.foodlabel.model.ProductCategory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -113,5 +114,52 @@ class ProductLabelAnalyzerTest {
 
         assertEquals(perHundred.score, perServing.score, 0.1)
     }
-}
 
+    @Test
+    fun `uses the category selected by the user`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Chocolate Cookies
+            Nutrition Information Per 100 g
+            Total Sugar 24 g
+            Sodium 200 mg
+            Ingredients: Sugar, refined wheat flour, cocoa
+            """.trimIndent(),
+            selectedCategory = ProductCategory.CHOCOLATE_AND_SWEETS,
+        )
+
+        assertEquals(ProductCategory.CHOCOLATE_AND_SWEETS, report.category)
+        assertEquals(222, report.peerComparison.peerCount)
+    }
+
+    @Test
+    fun `applies stricter sugar scoring to a selected beverage`() {
+        val text = """
+            Sweetened Product
+            Nutrition Information Per 100 ml
+            Protein 1 g
+            Total Sugar 10 g
+            Saturated Fat 0 g
+            Trans Fat 0 g
+            Sodium 20 mg
+            Ingredients: Water, fruit pulp, sugar
+        """.trimIndent()
+
+        val beverage = ProductLabelAnalyzer.analyze(text, ProductCategory.BEVERAGES_AND_JUICES)
+        val biscuit = ProductLabelAnalyzer.analyze(text, ProductCategory.BISCUITS_AND_BAKERY)
+
+        assertTrue(beverage.score < biscuit.score)
+    }
+
+    @Test
+    fun `category percentile compares only with selected peers`() {
+        val biscuit = CategoryBenchmark.compare(ProductCategory.BISCUITS_AND_BAKERY, 3.0)
+        val beverage = CategoryBenchmark.compare(ProductCategory.BEVERAGES_AND_JUICES, 3.0)
+
+        assertTrue(biscuit.percentile > beverage.percentile)
+        assertEquals(149, biscuit.peerCount)
+        assertEquals(118, beverage.peerCount)
+        assertTrue(ProductCategory.entries.all { CategoryBenchmark.peerCount(it) > 0 })
+        assertEquals(840, ProductCategory.entries.sumOf(CategoryBenchmark::peerCount))
+    }
+}

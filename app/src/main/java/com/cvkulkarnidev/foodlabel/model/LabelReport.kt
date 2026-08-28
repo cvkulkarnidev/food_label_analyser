@@ -36,13 +36,22 @@ enum class NutritionBasis(val label: String) {
 }
 
 enum class ProductCategory(val label: String) {
-    BEVERAGE("Beverage"),
-    DAIRY("Dairy"),
-    CEREAL("Cereal or breakfast food"),
-    SNACK("Snack"),
-    SAUCE_OR_SPREAD("Sauce or spread"),
-    GENERAL("Packaged food"),
+    BISCUITS_AND_BAKERY("Biscuits & bakery"),
+    BEVERAGES_AND_JUICES("Juices & beverages"),
+    SAVOURY_SNACKS("Savoury snacks"),
+    CHOCOLATE_AND_SWEETS("Chocolate & sweets"),
+    INSTANT_AND_READY_FOODS("Instant & ready foods"),
+    SAUCES_AND_SPREADS("Sauces & spreads"),
+    DAIRY_AND_YOGURT("Dairy & yoghurt"),
+    ICE_CREAM_AND_DESSERTS("Ice cream & desserts"),
 }
+
+data class PeerComparison(
+    val percentile: Int,
+    val peerCount: Int,
+    val position: String,
+    val isSmallSample: Boolean,
+)
 
 data class ScoreFactor(
     val title: String,
@@ -64,6 +73,6 @@ data class LabelReport(
     val verdict: String,
     val confidence: Double,
     val factors: List<ScoreFactor>,
+    val peerComparison: PeerComparison,
     val rawText: String,
 )
-

@@ -1,10 +1,12 @@
 package com.cvkulkarnidev.foodlabel.analysis
 
 import com.cvkulkarnidev.foodlabel.model.LabelReport
+import com.cvkulkarnidev.foodlabel.model.ProductCategory
 
 object ProductLabelAnalyzer {
-    fun analyze(rawText: String): LabelReport {
-        val parsed = LabelTextParser.parse(rawText)
+    fun analyze(rawText: String, selectedCategory: ProductCategory? = null): LabelReport {
+        val detected = LabelTextParser.parse(rawText)
+        val parsed = selectedCategory?.let { detected.copy(category = it) } ?: detected
         val result = HealthScorer.score(parsed)
         return LabelReport(
             productName = parsed.productName,
@@ -18,8 +20,8 @@ object ProductLabelAnalyzer {
             verdict = result.verdict,
             confidence = result.confidence,
             factors = result.factors,
+            peerComparison = CategoryBenchmark.compare(parsed.category, result.score),
             rawText = rawText,
         )
     }
 }
-

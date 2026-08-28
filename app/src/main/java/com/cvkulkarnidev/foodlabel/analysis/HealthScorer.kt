@@ -30,7 +30,7 @@ internal object HealthScorer {
 
         val sugar = normalized.addedSugarG ?: normalized.totalSugarG
         if (sugar != null) {
-            val beverage = parsed.category == ProductCategory.BEVERAGE
+            val beverage = parsed.category == ProductCategory.BEVERAGES_AND_JUICES
             val penalty = when {
                 beverage && sugar > 11.25 -> -1.5
                 beverage && sugar > 5.0 -> -0.9
