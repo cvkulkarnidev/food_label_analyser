@@ -23,7 +23,7 @@ internal object HealthScorer {
     private val refinedTerms = listOf("refined wheat flour", "maida", "maltodextrin", "hydrogenated", "palm oil")
     private val additiveRegex = Regex("\\b(?:INS|E)[ -]?\\d{3,4}[a-z]?\\b", RegexOption.IGNORE_CASE)
 
-    fun score(parsed: ParsedLabel): ScoreResult {
+    fun score(parsed: ParsedLabel, ocrConfidence: Double = 1.0): ScoreResult {
         val normalized = normalizeTo100(parsed.nutrition, parsed.nutritionBasis, parsed.servingSize)
         val factors = mutableListOf<ScoreFactor>()
         var rawScore = 4.5
@@ -129,7 +129,8 @@ internal object HealthScorer {
             }
         }
 
-        val confidence = calculateConfidence(parsed)
+        val confidence = (calculateConfidence(parsed) * ocrConfidence.coerceIn(0.35, 1.0))
+            .coerceIn(0.25, 0.96)
         // Pull low-evidence scores toward neutral instead of rewarding missing OCR fields.
         val conservative = (rawScore.coerceIn(0.5, 5.0) * confidence) + (3.0 * (1.0 - confidence))
         val score = (round(conservative.coerceIn(0.5, 5.0) * 10) / 10)

@@ -77,7 +77,9 @@ import androidx.core.content.FileProvider
 import coil3.compose.AsyncImage
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
 import com.cvkulkarnidev.foodlabel.model.LabelReport
+import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.NutritionFacts
+import com.cvkulkarnidev.foodlabel.model.OcrAssessment
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
 import com.cvkulkarnidev.foodlabel.model.ScoreFactor
 import com.cvkulkarnidev.foodlabel.ocr.OnDeviceOcr
@@ -112,10 +114,31 @@ class MainActivity : ComponentActivity() {
 
 private sealed interface ScreenState {
     data object Home : ScreenState
-    data class Reading(val imageUri: Uri, val category: ProductCategory) : ScreenState
-    data class Result(val imageUri: Uri, val report: LabelReport) : ScreenState
-    data class Error(val imageUri: Uri?, val message: String) : ScreenState
+    data class ImageInput(
+        val mode: InputMode,
+        val category: ProductCategory,
+        val nutritionUri: Uri? = null,
+        val ingredientsUri: Uri? = null,
+    ) : ScreenState
+    data class Reading(
+        val nutritionUri: Uri,
+        val ingredientsUri: Uri,
+        val category: ProductCategory,
+    ) : ScreenState
+    data class Result(
+        val nutritionUri: Uri,
+        val ingredientsUri: Uri,
+        val report: LabelReport,
+    ) : ScreenState
+    data class Error(val nutritionUri: Uri?, val message: String) : ScreenState
 }
+
+private enum class InputMode(val title: String, val action: String) {
+    CAPTURE("Capture both panels", "Capture"),
+    UPLOAD("Upload both panels", "Choose"),
+}
+
+private enum class ImageSlot { NUTRITION, INGREDIENTS }
 
 @Composable
 private fun LabelWiseApp(createCameraUri: () -> Uri) {
@@ -123,40 +146,77 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     val scope = rememberCoroutineScope()
     var state: ScreenState by remember { mutableStateOf(ScreenState.Home) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingImageSlot by remember { mutableStateOf<ImageSlot?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf<ProductCategory?>(null) }
 
-    fun analyze(uri: Uri, category: ProductCategory) {
-        state = ScreenState.Reading(uri, category)
+    fun setSelectedImage(slot: ImageSlot, uri: Uri) {
+        val current = state as? ScreenState.ImageInput ?: return
+        state = when (slot) {
+            ImageSlot.NUTRITION -> current.copy(nutritionUri = uri)
+            ImageSlot.INGREDIENTS -> current.copy(ingredientsUri = uri)
+        }
+    }
+
+    fun analyze(nutritionUri: Uri, ingredientsUri: Uri, category: ProductCategory) {
+        state = ScreenState.Reading(nutritionUri, ingredientsUri, category)
         scope.launch {
             try {
-                val rawText = OnDeviceOcr.read(context, uri)
-                if (rawText.count(Char::isLetterOrDigit) < 12) {
-                    state = ScreenState.Error(uri, "I couldn't find enough readable label text. Try a closer, sharper photo with less glare.")
+                val nutritionRead = OnDeviceOcr.read(context, nutritionUri, LabelPanel.NUTRITION)
+                val ingredientsRead = OnDeviceOcr.read(context, ingredientsUri, LabelPanel.INGREDIENTS)
+                val ingredientsText = if (
+                    Regex("^ingredients?\\b", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
+                        .containsMatchIn(ingredientsRead.text)
+                ) {
+                    ingredientsRead.text
+                } else {
+                    "Ingredients:\n${ingredientsRead.text}"
+                }
+                val rawText = "${nutritionRead.text}\n$ingredientsText".trim()
+                if (rawText.count(Char::isLetterOrDigit) < 24) {
+                    state = ScreenState.Error(
+                        nutritionUri,
+                        "I couldn't find enough readable text across the two photos. Retake both panels closer, in brighter light, and hold the phone steady.",
+                    )
                     return@launch
                 }
+                val ocrAssessment = OcrAssessment(
+                    images = listOf(nutritionRead.assessment, ingredientsRead.assessment),
+                )
                 val report = withContext(Dispatchers.Default) {
-                    ProductLabelAnalyzer.analyze(rawText, category)
+                    ProductLabelAnalyzer.analyze(rawText, category, ocrAssessment)
                 }
-                state = ScreenState.Result(uri, report)
+                state = ScreenState.Result(nutritionUri, ingredientsUri, report)
             } catch (error: Exception) {
-                state = ScreenState.Error(uri, error.message ?: "The image could not be analyzed.")
+                state = ScreenState.Error(nutritionUri, error.message ?: "The images could not be analyzed.")
             }
         }
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) selectedCategory?.let { analyze(uri, it) }
+        val slot = pendingImageSlot
+        if (uri != null && slot != null) setSelectedImage(slot, uri)
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = pendingCameraUri
-        if (saved && uri != null) selectedCategory?.let { analyze(uri, it) }
+        val slot = pendingImageSlot
+        if (saved && uri != null && slot != null) setSelectedImage(slot, uri)
     }
 
-    fun openCamera() {
+    fun requestImage(slot: ImageSlot) {
+        val current = state as? ScreenState.ImageInput ?: return
+        pendingImageSlot = slot
+        if (current.mode == InputMode.UPLOAD) {
+            galleryLauncher.launch("image/*")
+            return
+        }
         createCameraUri().also { uri ->
             pendingCameraUri = uri
             cameraLauncher.launch(uri)
         }
+    }
+
+    fun beginInput(mode: InputMode) {
+        selectedCategory?.let { state = ScreenState.ImageInput(mode = mode, category = it) }
     }
 
     BackHandler(enabled = state !is ScreenState.Home) { state = ScreenState.Home }
@@ -167,30 +227,42 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 modifier = Modifier.padding(padding),
                 selectedCategory = selectedCategory,
                 onCategorySelected = { selectedCategory = it },
-                onCapture = ::openCamera,
-                onUpload = { galleryLauncher.launch("image/*") },
+                onCapture = { beginInput(InputMode.CAPTURE) },
+                onUpload = { beginInput(InputMode.UPLOAD) },
+            )
+            is ScreenState.ImageInput -> ImageInputScreen(
+                modifier = Modifier.padding(padding),
+                state = current,
+                onBack = { state = ScreenState.Home },
+                onSelectImage = ::requestImage,
+                onAnalyze = {
+                    val nutrition = current.nutritionUri
+                    val ingredients = current.ingredientsUri
+                    if (nutrition != null && ingredients != null) analyze(nutrition, ingredients, current.category)
+                },
             )
             is ScreenState.Reading -> ReadingScreen(
                 modifier = Modifier.padding(padding),
-                uri = current.imageUri,
+                nutritionUri = current.nutritionUri,
+                ingredientsUri = current.ingredientsUri,
                 category = current.category,
                 onBack = { state = ScreenState.Home },
             )
             is ScreenState.Result -> ResultScreen(
                 modifier = Modifier.padding(padding),
-                uri = current.imageUri,
+                uri = current.nutritionUri,
                 report = current.report,
                 onBack = { state = ScreenState.Home },
-                onCapture = ::openCamera,
-                onUpload = { galleryLauncher.launch("image/*") },
+                onCapture = { beginInput(InputMode.CAPTURE) },
+                onUpload = { beginInput(InputMode.UPLOAD) },
             )
             is ScreenState.Error -> ErrorScreen(
                 modifier = Modifier.padding(padding),
-                uri = current.imageUri,
+                uri = current.nutritionUri,
                 message = current.message,
                 onBack = { state = ScreenState.Home },
-                onCapture = ::openCamera,
-                onUpload = { galleryLauncher.launch("image/*") },
+                onCapture = { beginInput(InputMode.CAPTURE) },
+                onUpload = { beginInput(InputMode.UPLOAD) },
             )
         }
     }
@@ -255,7 +327,7 @@ private fun HomeScreen(
             CategorySelector(selectedCategory, onCategorySelected)
             ActionCard(
                 title = "Capture label",
-                subtitle = "Take a clear photo of the ingredients and nutrition panel",
+                subtitle = "Take separate photos of the nutrition and ingredient panels",
                 icon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
                 primary = true,
                 enabled = selectedCategory != null,
@@ -263,7 +335,7 @@ private fun HomeScreen(
             )
             ActionCard(
                 title = "Upload image",
-                subtitle = "Choose an existing label photo from your device",
+                subtitle = "Choose two existing panel photos from your device",
                 icon = { Icon(Icons.Outlined.PhotoLibrary, contentDescription = null) },
                 primary = false,
                 enabled = selectedCategory != null,
@@ -289,7 +361,7 @@ private fun HomeScreen(
                     Column {
                         Text("Private by design", fontWeight = FontWeight.Bold, color = Forest)
                         Text(
-                            "OCR and scoring run on your phone. Your product image is not uploaded.",
+                            "OCR, image enhancement and scoring run on your phone. Your product photos are not uploaded.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = Forest.copy(alpha = 0.78f),
                         )
@@ -298,7 +370,7 @@ private fun HomeScreen(
             }
 
             Text(
-                "Tip: keep the label flat, fill the frame, and avoid reflections. Include both the nutrition table and ingredient list when possible.",
+                "Tip: keep each panel flat, fill the frame with text, tap to focus, and avoid reflections.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.58f),
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
@@ -381,6 +453,155 @@ private fun CategorySelector(
 }
 
 @Composable
+private fun ImageInputScreen(
+    modifier: Modifier,
+    state: ScreenState.ImageInput,
+    onBack: () -> Unit,
+    onSelectImage: (ImageSlot) -> Unit,
+    onAnalyze: () -> Unit,
+) {
+    Column(modifier.fillMaxSize()) {
+        SimpleTopBar(state.mode.title, onBack)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(state.category.label, color = Sage, fontWeight = FontWeight.Bold)
+            Text(
+                "Use two separate photos so the nutrition values and the full ingredient list are both large enough to read.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.68f),
+            )
+            ImageSlotCard(
+                number = "1",
+                title = "Nutrition label",
+                subtitle = "Include serving size, calories, sugar, fat, protein and sodium.",
+                uri = state.nutritionUri,
+                mode = state.mode,
+                onClick = { onSelectImage(ImageSlot.NUTRITION) },
+            )
+            ImageSlotCard(
+                number = "2",
+                title = "Ingredients list",
+                subtitle = "Include the complete ingredients and allergen statement.",
+                uri = state.ingredientsUri,
+                mode = state.mode,
+                onClick = { onSelectImage(ImageSlot.INGREDIENTS) },
+            )
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.16f)),
+                shape = RoundedCornerShape(18.dp),
+            ) {
+                Column(Modifier.padding(15.dp)) {
+                    Text("For better low-light OCR", fontWeight = FontWeight.Bold, color = Forest)
+                    Text(
+                        "Use flash or a lamp, keep the phone parallel to the panel, fill the frame with text, tap to focus, and hold still. The app will also test an automatically brightened and sharpened version.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Forest.copy(alpha = 0.78f),
+                    )
+                }
+            }
+
+            Button(
+                onClick = onAnalyze,
+                enabled = state.nutritionUri != null && state.ingredientsUri != null,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                shape = RoundedCornerShape(17.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Forest),
+            ) {
+                Icon(Icons.Outlined.HealthAndSafety, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Analyze both photos", fontWeight = FontWeight.Bold)
+            }
+            if (state.nutritionUri == null || state.ingredientsUri == null) {
+                Text(
+                    "Both photos are required before analysis.",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f),
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun ImageSlotCard(
+    number: String,
+    title: String,
+    subtitle: String,
+    uri: Uri?,
+    mode: InputMode,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(22.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(15.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (uri != null) {
+                AsyncImage(
+                    model = uri,
+                    contentDescription = "$title preview",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(88.dp)
+                        .clip(RoundedCornerShape(16.dp)),
+                )
+            } else {
+                Surface(
+                    color = SoftGreen,
+                    contentColor = Forest,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.size(88.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(number, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    if (uri != null) {
+                        Icon(Icons.Outlined.CheckCircle, contentDescription = "Selected", tint = Sage, modifier = Modifier.size(22.dp))
+                    }
+                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (uri == null) "${mode.action} photo" else "${mode.action} a replacement",
+                    color = Forest,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ActionCard(
     title: String,
     subtitle: String,
@@ -430,36 +651,50 @@ private fun LocalContentMuted(primary: Boolean): Color =
     if (primary) Color.White.copy(alpha = 0.72f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f)
 
 @Composable
-private fun ReadingScreen(modifier: Modifier, uri: Uri, category: ProductCategory, onBack: () -> Unit) {
+private fun ReadingScreen(
+    modifier: Modifier,
+    nutritionUri: Uri,
+    ingredientsUri: Uri,
+    category: ProductCategory,
+    onBack: () -> Unit,
+) {
     Column(modifier.fillMaxSize()) {
         SimpleTopBar("Reading your label", onBack)
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(28.dp)) {
-                Box {
-                    AsyncImage(
-                        model = uri,
-                        contentDescription = "Selected food label",
-                        modifier = Modifier
-                            .size(220.dp)
-                            .clip(RoundedCornerShape(28.dp)),
-                        contentScale = ContentScale.Crop,
-                    )
+                Box(contentAlignment = Alignment.Center) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        listOf(nutritionUri, ingredientsUri).forEach { uri ->
+                            AsyncImage(
+                                model = uri,
+                                contentDescription = "Selected food label panel",
+                                modifier = Modifier
+                                    .size(138.dp, 190.dp)
+                                    .clip(RoundedCornerShape(22.dp)),
+                                contentScale = ContentScale.Crop,
+                            )
+                        }
+                    }
                     Box(
                         Modifier
-                            .matchParentSize()
-                            .clip(RoundedCornerShape(28.dp))
-                            .background(Forest.copy(alpha = 0.35f)),
+                            .size(68.dp)
+                            .clip(CircleShape)
+                            .background(Forest.copy(alpha = 0.88f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        CircularProgressIndicator(color = Amber, strokeWidth = 5.dp, modifier = Modifier.size(58.dp))
+                        CircularProgressIndicator(color = Amber, strokeWidth = 5.dp, modifier = Modifier.size(48.dp))
                     }
                 }
                 Spacer(Modifier.height(28.dp))
-                Text("Extracting nutrition and ingredients…", fontSize = 19.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                Text("Checking image quality and reading both panels…", fontSize = 19.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(8.dp))
                 Text(category.label, color = Sage, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
-                Text("Everything is processed on this device.", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f))
+                Text(
+                    "Dim or soft images are retried with automatic enhancement. Everything stays on this device.",
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                )
             }
         }
     }
@@ -485,6 +720,7 @@ private fun ResultScreen(
         ) {
             Spacer(Modifier.height(2.dp))
             ProductHeader(uri, report)
+            OcrQualityCard(report)
             ScoreCard(report)
             PeerComparisonCard(report)
             FactorSection(report.factors)
@@ -500,6 +736,79 @@ private fun ResultScreen(
                 modifier = Modifier.padding(horizontal = 14.dp),
             )
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun OcrQualityCard(report: LabelReport) {
+    val assessment = report.ocrAssessment ?: return
+    val needsReview = assessment.needsReview
+    val accent = if (needsReview) Rose else Sage
+    Card(
+        colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.11f)),
+        shape = RoundedCornerShape(22.dp),
+    ) {
+        Column(Modifier.padding(17.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = if (needsReview) Icons.Outlined.WarningAmber else Icons.Outlined.CheckCircle,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(24.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (needsReview) "Check the OCR before trusting the score" else "Both photos look readable",
+                        fontWeight = FontWeight.Bold,
+                        color = accent,
+                    )
+                    Text(
+                        "${(assessment.confidence * 100).roundToInt()}% estimated OCR confidence",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            assessment.images.forEachIndexed { index, image ->
+                if (index > 0) HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(vertical = 9.dp),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(image.panel.label, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Text(
+                        image.quality.label,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (image.quality == com.cvkulkarnidev.foodlabel.model.OcrQuality.GOOD) Sage else Rose,
+                    )
+                }
+                Text(
+                    "Estimated confidence ${(image.confidence * 100).roundToInt()}%" +
+                        if (image.enhancedImageUsed) " • Enhanced OCR result used" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                )
+                image.warnings.forEach { warning ->
+                    Text(
+                        "• $warning",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Rose,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+            }
+            if (needsReview) {
+                Spacer(Modifier.height(9.dp))
+                Text(
+                    "Automatic brightening and mild sharpening can improve readable detail, but cannot reconstruct text lost to motion blur or severe darkness. Retake a photo when a warning persists.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                )
+            }
         }
     }
 }

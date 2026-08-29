@@ -1,6 +1,10 @@
 package com.cvkulkarnidev.foodlabel.analysis
 
 import com.cvkulkarnidev.foodlabel.model.NutritionBasis
+import com.cvkulkarnidev.foodlabel.model.ImageOcrAssessment
+import com.cvkulkarnidev.foodlabel.model.LabelPanel
+import com.cvkulkarnidev.foodlabel.model.OcrAssessment
+import com.cvkulkarnidev.foodlabel.model.OcrQuality
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -161,5 +165,53 @@ class ProductLabelAnalyzerTest {
         assertEquals(118, beverage.peerCount)
         assertTrue(ProductCategory.entries.all { CategoryBenchmark.peerCount(it) > 0 })
         assertEquals(840, ProductCategory.entries.sumOf(CategoryBenchmark::peerCount))
+    }
+
+    @Test
+    fun `low OCR confidence is retained and makes scoring conservative`() {
+        val text = """
+            Rolled Oats
+            Nutrition Information Per 100 g
+            Protein 13 g
+            Total Sugar 1 g
+            Dietary Fibre 10 g
+            Saturated Fat 1 g
+            Trans Fat 0 g
+            Sodium 5 mg
+            Ingredients: Whole grain rolled oats
+        """.trimIndent()
+        val baseline = ProductLabelAnalyzer.analyze(text, ProductCategory.INSTANT_AND_READY_FOODS)
+        val assessment = OcrAssessment(
+            images = listOf(
+                ImageOcrAssessment(
+                    panel = LabelPanel.NUTRITION,
+                    quality = OcrQuality.POOR,
+                    confidence = 0.42,
+                    brightness = 55,
+                    sharpness = 30,
+                    enhancedImageUsed = true,
+                    warnings = listOf("Nutrition label looks blurry."),
+                ),
+                ImageOcrAssessment(
+                    panel = LabelPanel.INGREDIENTS,
+                    quality = OcrQuality.REVIEW,
+                    confidence = 0.58,
+                    brightness = 82,
+                    sharpness = 90,
+                    enhancedImageUsed = true,
+                    warnings = listOf("Ingredients list photo is dim."),
+                ),
+            ),
+        )
+
+        val lowQuality = ProductLabelAnalyzer.analyze(
+            text,
+            ProductCategory.INSTANT_AND_READY_FOODS,
+            assessment,
+        )
+
+        assertEquals(assessment, lowQuality.ocrAssessment)
+        assertTrue(lowQuality.confidence < baseline.confidence)
+        assertTrue(kotlin.math.abs(lowQuality.score - 3.0) < kotlin.math.abs(baseline.score - 3.0))
     }
 }

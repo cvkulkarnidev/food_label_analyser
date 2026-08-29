@@ -53,6 +53,37 @@ data class PeerComparison(
     val isSmallSample: Boolean,
 )
 
+enum class LabelPanel(val label: String) {
+    NUTRITION("Nutrition label"),
+    INGREDIENTS("Ingredients list"),
+}
+
+enum class OcrQuality(val label: String) {
+    GOOD("Good"),
+    REVIEW("Review recommended"),
+    POOR("Poor — recapture recommended"),
+}
+
+data class ImageOcrAssessment(
+    val panel: LabelPanel,
+    val quality: OcrQuality,
+    val confidence: Double,
+    val brightness: Int,
+    val sharpness: Int,
+    val enhancedImageUsed: Boolean,
+    val warnings: List<String>,
+)
+
+data class OcrAssessment(
+    val images: List<ImageOcrAssessment>,
+) {
+    val confidence: Double
+        get() = images.map(ImageOcrAssessment::confidence).average().takeIf { !it.isNaN() } ?: 0.25
+
+    val needsReview: Boolean
+        get() = images.any { it.quality != OcrQuality.GOOD }
+}
+
 data class ScoreFactor(
     val title: String,
     val detail: String,
@@ -74,5 +105,6 @@ data class LabelReport(
     val confidence: Double,
     val factors: List<ScoreFactor>,
     val peerComparison: PeerComparison,
+    val ocrAssessment: OcrAssessment? = null,
     val rawText: String,
 )
