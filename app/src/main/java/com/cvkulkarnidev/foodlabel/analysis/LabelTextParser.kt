@@ -16,8 +16,14 @@ internal data class ParsedLabel(
 )
 
 internal object LabelTextParser {
-    private val numberRegex = Regex("(?<![A-Za-z])([0-9]+(?:[.,][0-9]+)?)\\s*(kcal|kj|mg|mcg|g)?", RegexOption.IGNORE_CASE)
-    private val servingRegex = Regex("serv(?:ing|e)\\s*size\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?\\s*(?:g|ml))", RegexOption.IGNORE_CASE)
+    private val numberRegex = Regex(
+        "(?<![A-Za-z])([0-9]+(?:[.,][0-9]+)?)\\s*(?:\\|\\s*)?(kcal|kj|mg|mcg|g)?",
+        RegexOption.IGNORE_CASE,
+    )
+    private val servingRegex = Regex(
+        "serv(?:ing|e)\\s*size\\s*[:|\\-]?\\s*([0-9]+(?:[.,][0-9]+)?\\s*(?:\\|\\s*)?(?:g|ml))",
+        RegexOption.IGNORE_CASE,
+    )
 
     fun parse(rawText: String): ParsedLabel {
         val normalizedText = NutritionTextNormalizer.normalize(rawText)
@@ -48,7 +54,7 @@ internal object LabelTextParser {
             allergens = extractAllergens(lines),
             nutrition = validation.nutrition,
             nutritionBasis = detectedBasis,
-            servingSize = servingRegex.find(normalizedText.text)?.groupValues?.get(1),
+            servingSize = servingRegex.find(normalizedText.text)?.groupValues?.get(1)?.replace("|", "")?.replace(Regex("\\s+"), " "),
             extractionWarnings = (normalizedText.corrections + validation.warnings).distinct(),
         )
     }
@@ -181,8 +187,8 @@ internal object LabelTextParser {
     private fun detectBasis(lines: List<String>): NutritionBasis {
         val header = lines.take(30).joinToString(" ").lowercase()
         return when {
-            Regex("per\\s*100\\s*ml").containsMatchIn(header) -> NutritionBasis.PER_100_ML
-            Regex("per\\s*100\\s*g").containsMatchIn(header) -> NutritionBasis.PER_100_G
+            Regex("per\\s*100\\s*(?:\\|\\s*)?ml").containsMatchIn(header) -> NutritionBasis.PER_100_ML
+            Regex("per\\s*100\\s*(?:\\|\\s*)?g").containsMatchIn(header) -> NutritionBasis.PER_100_G
             Regex("per\\s*(?:serve|serving)").containsMatchIn(header) -> NutritionBasis.PER_SERVING
             Regex("per\\s*pack").containsMatchIn(header) -> NutritionBasis.PER_PACK
             else -> NutritionBasis.UNKNOWN

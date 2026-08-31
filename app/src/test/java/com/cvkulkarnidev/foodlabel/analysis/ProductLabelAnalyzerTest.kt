@@ -272,4 +272,20 @@ class ProductLabelAnalyzerTest {
         assertEquals(null, report.nutrition.saturatedFatG)
         assertTrue(report.extractionWarnings.size >= 2)
     }
+
+    @Test
+    fun `reads units separated into geometric table cells`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Table Product
+            Nutrition Information | Per 100 | g
+            Protein | 7.5 | g
+            Salt | 1 | g
+            Ingredients: Oats, salt
+            """.trimIndent(),
+        )
+
+        assertEquals(7.5, report.nutrition.proteinG ?: -1.0, 0.001)
+        assertEquals(400.0, report.nutrition.sodiumMg ?: -1.0, 0.001)
+    }
 }
