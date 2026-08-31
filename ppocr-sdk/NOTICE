@@ -1,0 +1,7 @@
+This module incorporates source code from PaddlePaddle/PaddleOCR,
+deploy/ppocr-android/ppocr-sdk, licensed under the Apache License 2.0.
+
+Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+
+Upstream source: https://github.com/PaddlePaddle/PaddleOCR/tree/main/deploy/ppocr-android
+License: https://www.apache.org/licenses/LICENSE-2.0

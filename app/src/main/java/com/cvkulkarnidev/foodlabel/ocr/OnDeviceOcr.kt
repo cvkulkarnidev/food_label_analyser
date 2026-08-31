@@ -67,9 +67,50 @@ object OnDeviceOcr {
                 )
             }
 
+            var enginesCompared = listOf(OcrEngine.ML_KIT.label)
+            var paddleContributed = false
+            var paddleInferenceTimeMs: Long? = null
+            when (val paddle = PaddleOcrEngine.recognize(context, selectedBitmap)) {
+                is PaddleReadOutcome.Success -> {
+                    enginesCompared = listOf(OcrEngine.ML_KIT.label, OcrEngine.PADDLE.label)
+                    paddleInferenceTimeMs = paddle.inferenceTimeMs
+                    val paddlePage = RecognizedPage(
+                        lines = paddle.lines.map { line ->
+                            RecognizedLine(
+                                text = line.text,
+                                boundingBox = line.boundingBox,
+                                confidence = line.confidence,
+                                elements = emptyList(),
+                                engine = OcrEngine.PADDLE,
+                            )
+                        },
+                        fallbackText = paddle.lines.joinToString("\n", transform = PaddleRecognizedLine::text),
+                    )
+                    val paddleRendered = render(paddlePage, panel)
+                    selectedRendered = combineReadings(selectedRendered, paddleRendered, panel)
+                    paddleContributed = selectedRendered.rows.any { it.engine == OcrEngine.PADDLE }
+                }
+                is PaddleReadOutcome.Unavailable -> {
+                    selectedRendered = selectedRendered.copy(
+                        warnings = (
+                            selectedRendered.warnings +
+                                "PaddleOCR was unavailable (${paddle.reason}); the ML Kit reading was used."
+                            ).distinct(),
+                    )
+                }
+            }
+
             OcrReadResult(
                 text = selectedRendered.text,
-                assessment = assess(panel, metrics, selectedRendered, enhancedWasSelected),
+                assessment = assess(
+                    panel = panel,
+                    metrics = metrics,
+                    rendered = selectedRendered,
+                    enhancedImageUsed = enhancedWasSelected,
+                    enginesCompared = enginesCompared,
+                    paddleContributed = paddleContributed,
+                    paddleInferenceTimeMs = paddleInferenceTimeMs,
+                ),
             )
         } finally {
             recognizer.close()
@@ -109,6 +150,7 @@ object OnDeviceOcr {
                                 text = line.text,
                                 boundingBox = line.boundingBox?.let(::Rect),
                                 confidence = line.confidence?.toDouble(),
+                                engine = OcrEngine.ML_KIT,
                                 elements = line.elements.map { element ->
                                     RecognizedElement(
                                         text = element.text,
@@ -136,6 +178,7 @@ object OnDeviceOcr {
                         text = line.text,
                         boundingBox = line.boundingBox,
                         confidence = line.confidence,
+                        engine = line.engine,
                     )
                 },
                 fallbackText = page.fallbackText,
@@ -165,11 +208,137 @@ object OnDeviceOcr {
         )
     }
 
+    private fun combineReadings(
+        mlKit: RenderedPage,
+        paddle: RenderedPage,
+        panel: LabelPanel,
+    ): RenderedPage {
+        if (paddle.text.isBlank()) {
+            return mlKit.copy(
+                warnings = (
+                    mlKit.warnings +
+                        "PaddleOCR found no usable text in this panel; the ML Kit reading was kept."
+                    ).distinct(),
+            )
+        }
+
+        if (panel == LabelPanel.INGREDIENTS) {
+            val selected = if (textEvidence(paddle, panel) >= textEvidence(mlKit, panel)) paddle else mlKit
+            val usedPaddle = selected.rows.any { it.engine == OcrEngine.PADDLE }
+            return selected.copy(
+                corrections = (
+                    selected.corrections +
+                        if (usedPaddle) {
+                            listOf("PaddleOCR supplied the stronger ingredients reading after both engines were compared.")
+                        } else {
+                            emptyList()
+                        }
+                    ).distinct(),
+            )
+        }
+
+        val paddleIsPrimary = textEvidence(paddle, panel) >= textEvidence(mlKit, panel)
+        val primary = if (paddleIsPrimary) paddle else mlKit
+        val alternate = if (paddleIsPrimary) mlKit else paddle
+        val rows = primary.rows.toMutableList()
+        var disagreements = 0
+
+        alternate.rows.forEach { candidate ->
+            val key = nutritionRowKey(candidate.text) ?: return@forEach
+            val existingIndex = rows.indexOfFirst { nutritionRowKey(it.text) == key }
+            if (existingIndex < 0) {
+                rows += candidate
+                return@forEach
+            }
+
+            val existing = rows[existingIndex]
+            val existingValues = measurementSignature(existing.text)
+            val candidateValues = measurementSignature(candidate.text)
+            if (
+                existingValues.isNotEmpty() &&
+                candidateValues.isNotEmpty() &&
+                existingValues != candidateValues
+            ) {
+                disagreements++
+            }
+            if (rowPreference(candidate) > rowPreference(existing)) {
+                rows[existingIndex] = candidate
+            }
+        }
+
+        val sortedRows = rows.sortedWith(
+            compareBy(
+                { it.boundingBox?.top ?: Int.MAX_VALUE },
+                { it.boundingBox?.left ?: Int.MAX_VALUE },
+            ),
+        )
+        val paddleRows = sortedRows.count { it.engine == OcrEngine.PADDLE }
+        val generatedWarnings = sortedRows.mapNotNull { row ->
+            when {
+                isNutritionRow(row.text) && Regex("(?i)\\d\\s+9(?:\\s|$)").containsMatchIn(row.text) ->
+                    "A possible g/9 confusion remains in: “${row.text.take(52)}”. Confirm this value."
+                isNutritionRow(row.text) && (row.confidence ?: 1.0) < 0.58 ->
+                    "A selected nutrition row has low character confidence: “${row.text.take(52)}”."
+                else -> null
+            }
+        }
+        val disagreementWarning = if (disagreements > 0) {
+            listOf(
+                "ML Kit and PaddleOCR read ${disagreements} nutrition row(s) differently. " +
+                    "The higher-confidence, unit-consistent value was selected; verify it in the raw OCR text.",
+            )
+        } else {
+            emptyList()
+        }
+        val paddleNote = if (paddleRows > 0) {
+            listOf("PaddleOCR contributed ${paddleRows} selected nutrition row(s) after both engines were compared.")
+        } else {
+            emptyList()
+        }
+
+        return primary.copy(
+            rows = sortedRows,
+            fallbackText = if (paddleIsPrimary) paddle.fallbackText else mlKit.fallbackText,
+            corrections = (primary.corrections + alternate.corrections + paddleNote).distinct(),
+            warnings = (primary.warnings + generatedWarnings + disagreementWarning).distinct(),
+        )
+    }
+
+    private fun rowPreference(row: RenderedRow): Int =
+        rowEvidence(row) + if (row.engine == OcrEngine.PADDLE) 3 else 0
+
+    private fun nutritionRowKey(text: String): String? {
+        val normalized = text.lowercase()
+        return when {
+            isBasisRow(normalized) -> "basis"
+            "serving" in normalized || "serve size" in normalized -> "serving"
+            "energy" in normalized || "calorie" in normalized -> "energy"
+            "protein" in normalized -> "protein"
+            "carbohydrate" in normalized || "carbohydrates" in normalized -> "carbohydrate"
+            "added sugar" in normalized -> "added sugar"
+            "total sugar" in normalized -> "total sugar"
+            "sugar" in normalized -> "sugar"
+            "fibre" in normalized || "fiber" in normalized -> "fibre"
+            "saturated fat" in normalized -> "saturated fat"
+            "trans fat" in normalized -> "trans fat"
+            Regex("\\bfat\\b").containsMatchIn(normalized) -> "fat"
+            "sodium" in normalized -> "sodium"
+            Regex("\\bsalt\\b").containsMatchIn(normalized) -> "salt"
+            else -> null
+        }
+    }
+
+    private fun measurementSignature(text: String): List<String> =
+        Regex("(?i)\\d+(?:[.,]\\d+)?\\s*(?:kcal|kj|mg|mcg|g)\\b")
+            .findAll(text)
+            .map { it.value.lowercase().replace(" ", "") }
+            .toList()
+
     private fun buildGeometryRows(lines: List<RecognizedLine>): List<RenderedRow> {
         val positioned = lines.filter { it.boundingBox != null }
             .sortedWith(compareBy({ it.boundingBox!!.top }, { it.boundingBox!!.left }))
         if (positioned.isEmpty()) {
-            return lines.map { RenderedRow(it.text, it.boundingBox, it.confidence) }
+            return lines.map { RenderedRow(it.text, it.boundingBox, it.confidence, it.engine) }
         }
 
         val groups = mutableListOf<MutableList<RecognizedLine>>()
@@ -196,11 +365,12 @@ object OnDeviceOcr {
                 text = text,
                 boundingBox = box,
                 confidence = confidences.average().takeIf { !it.isNaN() },
+                engine = group.maxByOrNull { it.confidence ?: 0.0 }?.engine ?: OcrEngine.ML_KIT,
             )
         }
 
         val unpositioned = lines.filter { it.boundingBox == null }
-            .map { RenderedRow(it.text, null, it.confidence) }
+            .map { RenderedRow(it.text, null, it.confidence, it.engine) }
         return rendered + unpositioned
     }
 
@@ -418,6 +588,9 @@ object OnDeviceOcr {
         metrics: ImageMetrics,
         rendered: RenderedPage,
         enhancedImageUsed: Boolean,
+        enginesCompared: List<String>,
+        paddleContributed: Boolean,
+        paddleInferenceTimeMs: Long?,
     ): ImageOcrAssessment {
         val text = rendered.text
         val warnings = rendered.warnings.toMutableList()
@@ -473,6 +646,9 @@ object OnDeviceOcr {
             warnings = warnings.distinct(),
             recognitionConfidence = rendered.recognitionConfidence,
             corrections = rendered.corrections,
+            enginesCompared = enginesCompared,
+            paddleOcrContributed = paddleContributed,
+            paddleInferenceTimeMs = paddleInferenceTimeMs,
         )
     }
 
@@ -526,6 +702,11 @@ object OnDeviceOcr {
         return (red * 77 + green * 150 + blue * 29) shr 8
     }
 
+    private enum class OcrEngine(val label: String) {
+        ML_KIT("ML Kit"),
+        PADDLE("PaddleOCR"),
+    }
+
     private data class ImageMetrics(
         val brightness: Int,
         val contrast: Int,
@@ -544,6 +725,7 @@ object OnDeviceOcr {
         val boundingBox: Rect?,
         val confidence: Double?,
         val elements: List<RecognizedElement>,
+        val engine: OcrEngine,
     )
 
     private data class RecognizedPage(
@@ -555,6 +737,7 @@ object OnDeviceOcr {
         val text: String,
         val boundingBox: Rect?,
         val confidence: Double?,
+        val engine: OcrEngine = OcrEngine.ML_KIT,
     )
 
     private data class RenderedPage(
