@@ -30,13 +30,11 @@ download_model \
     "$MODEL_ROOT/rec/inference.onnx" \
     "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634"
 
-# The recognition YAML contains the model's character dictionary. Its checksum
-# is pinned after the first CI download and is verified in the workflow.
-curl --fail --location --retry 4 --retry-all-errors --connect-timeout 20 \
-    --output "$MODEL_ROOT/rec/inference.yml" \
-    "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/35200ec2acf6562260fa500e3262f5ea11f33642/inference.yml?download=true"
+download_model \
+    "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/35200ec2acf6562260fa500e3262f5ea11f33642/inference.yml?download=true" \
+    "$MODEL_ROOT/rec/inference.yml" \
+    "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
 
-test "$(wc -c < "$MODEL_ROOT/rec/inference.yml")" -ge 100000
 sha256sum \
     "$MODEL_ROOT/det/inference.onnx" \
     "$MODEL_ROOT/rec/inference.onnx" \

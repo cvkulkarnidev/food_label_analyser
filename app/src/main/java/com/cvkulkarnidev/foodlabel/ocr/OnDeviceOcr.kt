@@ -149,13 +149,13 @@ object OnDeviceOcr {
                             RecognizedLine(
                                 text = line.text,
                                 boundingBox = line.boundingBox?.let(::Rect),
-                                confidence = line.confidence?.toDouble(),
+                                confidence = line.confidence.toDouble(),
                                 engine = OcrEngine.ML_KIT,
                                 elements = line.elements.map { element ->
                                     RecognizedElement(
                                         text = element.text,
                                         boundingBox = element.boundingBox?.let(::Rect),
-                                        confidence = element.confidence?.toDouble(),
+                                        confidence = element.confidence.toDouble(),
                                     )
                                 },
                             )
