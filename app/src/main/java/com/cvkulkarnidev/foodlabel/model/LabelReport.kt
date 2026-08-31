@@ -72,6 +72,8 @@ data class ImageOcrAssessment(
     val sharpness: Int,
     val enhancedImageUsed: Boolean,
     val warnings: List<String>,
+    val recognitionConfidence: Double? = null,
+    val corrections: List<String> = emptyList(),
 )
 
 data class OcrAssessment(
@@ -106,5 +108,6 @@ data class LabelReport(
     val factors: List<ScoreFactor>,
     val peerComparison: PeerComparison,
     val ocrAssessment: OcrAssessment? = null,
+    val extractionWarnings: List<String> = emptyList(),
     val rawText: String,
 )

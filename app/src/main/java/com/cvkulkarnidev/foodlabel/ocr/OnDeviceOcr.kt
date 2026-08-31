@@ -3,7 +3,9 @@ package com.cvkulkarnidev.foodlabel.ocr
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
+import android.graphics.Rect
 import android.net.Uri
+import com.cvkulkarnidev.foodlabel.analysis.NutritionTextNormalizer
 import com.cvkulkarnidev.foodlabel.model.ImageOcrAssessment
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.OcrQuality
@@ -12,6 +14,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -28,37 +31,49 @@ data class OcrReadResult(
 
 object OnDeviceOcr {
     private const val MAX_IMAGE_DIMENSION = 1_800
+    private const val MAX_RETRIED_ROWS = 6
 
     suspend fun read(context: Context, uri: Uri, panel: LabelPanel): OcrReadResult = withContext(Dispatchers.Default) {
         val original = decodeBitmap(context, uri)
         val metrics = measure(original)
         val shouldEnhance = metrics.brightness < 115 || metrics.contrast < 38 || metrics.sharpness < 140
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        var enhanced: Bitmap? = null
 
         try {
-            val originalText = recognize(recognizer, original)
-            var selectedText = originalText
+            val originalPage = recognize(recognizer, original)
+            val originalRendered = render(originalPage, panel)
+            var selectedRendered = originalRendered
+            var selectedBitmap = original
             var enhancedWasSelected = false
 
             if (shouldEnhance) {
-                val enhanced = enhance(original, metrics)
-                try {
-                    val enhancedText = recognize(recognizer, enhanced)
-                    if (textEvidence(enhancedText, panel) > textEvidence(originalText, panel)) {
-                        selectedText = enhancedText
-                        enhancedWasSelected = true
-                    }
-                } finally {
-                    enhanced.recycle()
+                val enhancedBitmap = enhance(original, metrics)
+                enhanced = enhancedBitmap
+                val enhancedPage = recognize(recognizer, enhancedBitmap)
+                val enhancedRendered = render(enhancedPage, panel)
+                if (textEvidence(enhancedRendered, panel) > textEvidence(originalRendered, panel)) {
+                    selectedRendered = enhancedRendered
+                    selectedBitmap = enhancedBitmap
+                    enhancedWasSelected = true
                 }
             }
 
+            if (panel == LabelPanel.NUTRITION) {
+                selectedRendered = refineNutritionRows(
+                    recognizer = recognizer,
+                    bitmap = selectedBitmap,
+                    initial = selectedRendered,
+                )
+            }
+
             OcrReadResult(
-                text = selectedText,
-                assessment = assess(panel, metrics, selectedText, enhancedWasSelected),
+                text = selectedRendered.text,
+                assessment = assess(panel, metrics, selectedRendered, enhancedWasSelected),
             )
         } finally {
             recognizer.close()
+            enhanced?.recycle()
             original.recycle()
         }
     }
@@ -83,21 +98,235 @@ object OnDeviceOcr {
     private suspend fun recognize(
         recognizer: com.google.mlkit.vision.text.TextRecognizer,
         bitmap: Bitmap,
-    ): String = suspendCancellableCoroutine { continuation ->
+    ): RecognizedPage = suspendCancellableCoroutine { continuation ->
         recognizer.process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { result ->
                 if (continuation.isActive) {
-                    val orderedLines = result.textBlocks
+                    val lines = result.textBlocks
                         .flatMap { it.lines }
-                        .sortedWith(compareBy({ it.boundingBox?.top ?: 0 }, { it.boundingBox?.left ?: 0 }))
-                        .joinToString("\n") { it.text }
-                    continuation.resume(orderedLines.ifBlank { result.text })
+                        .map { line ->
+                            RecognizedLine(
+                                text = line.text,
+                                boundingBox = line.boundingBox?.let(::Rect),
+                                confidence = line.confidence?.toDouble(),
+                                elements = line.elements.map { element ->
+                                    RecognizedElement(
+                                        text = element.text,
+                                        boundingBox = element.boundingBox?.let(::Rect),
+                                        confidence = element.confidence?.toDouble(),
+                                    )
+                                },
+                            )
+                        }
+                    continuation.resume(RecognizedPage(lines, result.text))
                 }
             }
             .addOnFailureListener { error ->
                 if (continuation.isActive) continuation.resumeWithException(error)
             }
     }
+
+    private fun render(page: RecognizedPage, panel: LabelPanel): RenderedPage {
+        if (panel == LabelPanel.INGREDIENTS) {
+            val ordered = page.lines
+                .sortedWith(compareBy({ it.boundingBox?.top ?: Int.MAX_VALUE }, { it.boundingBox?.left ?: Int.MAX_VALUE }))
+            return RenderedPage(
+                rows = ordered.map { line ->
+                    RenderedRow(
+                        text = line.text,
+                        boundingBox = line.boundingBox,
+                        confidence = line.confidence,
+                    )
+                },
+                fallbackText = page.fallbackText,
+                corrections = emptyList(),
+                warnings = emptyList(),
+            )
+        }
+
+        val corrections = mutableListOf<String>()
+        val rows = buildGeometryRows(page.lines).map { row ->
+            val normalized = NutritionTextNormalizer.normalize(row.text)
+            corrections += normalized.corrections
+            row.copy(text = normalized.text)
+        }
+        val warnings = rows.mapNotNull { row ->
+            if (isNutritionRow(row.text) && (row.confidence ?: 1.0) < 0.58) {
+                "A nutrition row has low character confidence: “${row.text.take(52)}”."
+            } else {
+                null
+            }
+        }
+        return RenderedPage(
+            rows = rows,
+            fallbackText = page.fallbackText,
+            corrections = corrections.distinct(),
+            warnings = warnings.distinct(),
+        )
+    }
+
+    private fun buildGeometryRows(lines: List<RecognizedLine>): List<RenderedRow> {
+        val positioned = lines.filter { it.boundingBox != null }
+            .sortedWith(compareBy({ it.boundingBox!!.top }, { it.boundingBox!!.left }))
+        if (positioned.isEmpty()) {
+            return lines.map { RenderedRow(it.text, it.boundingBox, it.confidence) }
+        }
+
+        val groups = mutableListOf<MutableList<RecognizedLine>>()
+        positioned.forEach { line ->
+            val matching = groups.lastOrNull()?.takeIf { group ->
+                group.any { sameVisualRow(it.boundingBox!!, line.boundingBox!!) }
+            }
+            if (matching != null) matching += line else groups += mutableListOf(line)
+        }
+
+        val rendered = groups.map { group ->
+            val elements = group.flatMap(RecognizedLine::elements)
+                .filter { it.boundingBox != null }
+                .sortedBy { it.boundingBox!!.left }
+            val text = if (elements.isNotEmpty()) {
+                joinElements(elements)
+            } else {
+                group.sortedBy { it.boundingBox!!.left }.joinToString(" | ", transform = RecognizedLine::text)
+            }
+            val box = group.mapNotNull(RecognizedLine::boundingBox).reduce(::union)
+            val confidences = elements.mapNotNull(RecognizedElement::confidence)
+                .ifEmpty { group.mapNotNull(RecognizedLine::confidence) }
+            RenderedRow(
+                text = text,
+                boundingBox = box,
+                confidence = confidences.average().takeIf { !it.isNaN() },
+            )
+        }
+
+        val unpositioned = lines.filter { it.boundingBox == null }
+            .map { RenderedRow(it.text, null, it.confidence) }
+        return rendered + unpositioned
+    }
+
+    private fun sameVisualRow(first: Rect, second: Rect): Boolean {
+        val overlap = min(first.bottom, second.bottom) - max(first.top, second.top)
+        val smallerHeight = min(first.height(), second.height()).coerceAtLeast(1)
+        val centerDistance = abs((first.top + first.bottom) - (second.top + second.bottom)) / 2.0
+        return overlap.toDouble() / smallerHeight >= 0.35 ||
+            centerDistance <= max(first.height(), second.height()) * 0.48
+    }
+
+    private fun joinElements(elements: List<RecognizedElement>): String {
+        val output = StringBuilder()
+        var previous: Rect? = null
+        elements.forEach { element ->
+            val box = element.boundingBox!!
+            if (output.isNotEmpty()) {
+                val gap = box.left - (previous?.right ?: box.left)
+                val rowHeight = max(box.height(), previous?.height() ?: box.height())
+                output.append(if (gap > max(22, (rowHeight * 1.7).roundToInt())) " | " else " ")
+            }
+            output.append(element.text)
+            previous = box
+        }
+        return output.toString()
+    }
+
+    private suspend fun refineNutritionRows(
+        recognizer: com.google.mlkit.vision.text.TextRecognizer,
+        bitmap: Bitmap,
+        initial: RenderedPage,
+    ): RenderedPage {
+        val candidates = initial.rows.withIndex()
+            .filter { (_, row) -> shouldRetry(row) && row.boundingBox != null }
+            .take(MAX_RETRIED_ROWS)
+        if (candidates.isEmpty()) return initial
+
+        val refined = initial.rows.toMutableList()
+        val corrections = initial.corrections.toMutableList()
+        for ((index, row) in candidates) {
+            val crop = cropAndUpscale(bitmap, row.boundingBox!!) ?: continue
+            try {
+                val retried = render(recognize(recognizer, crop), LabelPanel.NUTRITION)
+                val best = retried.rows
+                    .filter { isNutritionRow(it.text) || isBasisRow(row.text) }
+                    .maxByOrNull(::rowEvidence)
+                    ?: retried.rows.maxByOrNull(::rowEvidence)
+                    ?: continue
+                if (rowEvidence(best) >= rowEvidence(row) + 7 && best.text != row.text) {
+                    refined[index] = row.copy(
+                        text = best.text,
+                        confidence = maxOf(row.confidence ?: 0.0, best.confidence ?: 0.0),
+                    )
+                    corrections += "Re-read a low-confidence nutrition row at higher resolution: “${best.text.take(52)}”."
+                    corrections += retried.corrections
+                }
+            } finally {
+                crop.recycle()
+            }
+        }
+
+        val warnings = refined.mapNotNull { row ->
+            when {
+                isNutritionRow(row.text) && Regex("(?i)\\d\\s+9(?:\\s|$)").containsMatchIn(row.text) ->
+                    "A possible g/9 confusion remains in: “${row.text.take(52)}”. Confirm this value."
+                isNutritionRow(row.text) && (row.confidence ?: 1.0) < 0.58 ->
+                    "A nutrition row remains low-confidence after a high-resolution retry: “${row.text.take(52)}”."
+                else -> null
+            }
+        }
+        return initial.copy(
+            rows = refined,
+            corrections = corrections.distinct(),
+            warnings = (initial.warnings + warnings).distinct(),
+        )
+    }
+
+    private fun cropAndUpscale(bitmap: Bitmap, box: Rect): Bitmap? {
+        val padX = max(8, box.height() / 2)
+        val padY = max(5, box.height() / 4)
+        val left = (box.left - padX).coerceIn(0, bitmap.width - 1)
+        val top = (box.top - padY).coerceIn(0, bitmap.height - 1)
+        val right = (box.right + padX).coerceIn(left + 1, bitmap.width)
+        val bottom = (box.bottom + padY).coerceIn(top + 1, bitmap.height)
+        if (right - left < 8 || bottom - top < 8) return null
+
+        val crop = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+        val scale = (112.0 / crop.height).coerceIn(1.0, 4.0)
+        val targetWidth = (crop.width * scale).roundToInt().coerceAtMost(2_600)
+        val targetHeight = (crop.height * scale).roundToInt()
+        if (targetWidth == crop.width && targetHeight == crop.height) return crop
+        return Bitmap.createScaledBitmap(crop, targetWidth, targetHeight, true).also { crop.recycle() }
+    }
+
+    private fun shouldRetry(row: RenderedRow): Boolean {
+        if (!isNutritionRow(row.text) && !isBasisRow(row.text)) return false
+        val confidence = row.confidence ?: 0.70
+        val suspiciousUnit = Regex("(?i)(?:\\d\\s+9\\b|m9\\b|rn9\\b|\\(9\\))").containsMatchIn(row.text)
+        val missingUnit = isNutritionRow(row.text) && Regex("\\d").containsMatchIn(row.text) &&
+            !Regex("(?i)\\b(?:kcal|kj|mg|mcg|g)\\b").containsMatchIn(row.text)
+        return confidence < 0.80 || suspiciousUnit || missingUnit
+    }
+
+    private fun rowEvidence(row: RenderedRow): Int {
+        val text = row.text
+        var score = ((row.confidence ?: 0.5) * 100).roundToInt()
+        if (isNutritionRow(text)) score += 55
+        if (isBasisRow(text)) score += 40
+        if (Regex("(?i)\\d+(?:[.,]\\d+)?\\s*(?:kcal|kj|mg|mcg|g)\\b").containsMatchIn(text)) score += 35
+        if (Regex("(?i)(?:m9|rn9|\\d\\s+9\\b|\\(9\\))").containsMatchIn(text)) score -= 45
+        return score
+    }
+
+    private fun isNutritionRow(text: String): Boolean = Regex(
+        "(?i)\\b(?:energy|calories?|protein|carbohydrates?|sugars?|fib(?:re|er)|fat|sodium|salt)\\b",
+    ).containsMatchIn(text)
+
+    private fun isBasisRow(text: String): Boolean =
+        Regex("(?i)\\bper\\s*(?:100|serv(?:e|ing)|pack)").containsMatchIn(text)
+
+    private fun union(first: Rect, second: Rect): Rect = Rect(
+        min(first.left, second.left),
+        min(first.top, second.top),
+        max(first.right, second.right),
+        max(first.bottom, second.bottom),
+    )
 
     private fun measure(bitmap: Bitmap): ImageMetrics {
         val width = bitmap.width
@@ -187,10 +416,11 @@ object OnDeviceOcr {
     private fun assess(
         panel: LabelPanel,
         metrics: ImageMetrics,
-        text: String,
+        rendered: RenderedPage,
         enhancedImageUsed: Boolean,
     ): ImageOcrAssessment {
-        val warnings = mutableListOf<String>()
+        val text = rendered.text
+        val warnings = rendered.warnings.toMutableList()
         if (metrics.brightness < 72) {
             warnings += "${panel.label} photo is very dark; some text may be missing."
         } else if (metrics.brightness < 98) {
@@ -221,9 +451,10 @@ object OnDeviceOcr {
         val sharpnessScore = (metrics.sharpness / 160.0).coerceIn(0.15, 1.0)
         val amountScore = (alphanumericCount / expectedText).coerceIn(0.1, 1.0)
         val keywordScore = (keywordCount / 4.0).coerceIn(0.1, 1.0)
-        var confidence = 0.2 * brightnessScore + 0.15 * contrastScore + 0.2 * sharpnessScore +
-            0.25 * amountScore + 0.2 * keywordScore
-        if (enhancedImageUsed) confidence = min(0.92, confidence + 0.05)
+        val recognitionScore = rendered.recognitionConfidence.coerceIn(0.15, 1.0)
+        var confidence = 0.14 * brightnessScore + 0.10 * contrastScore + 0.16 * sharpnessScore +
+            0.18 * amountScore + 0.16 * keywordScore + 0.26 * recognitionScore
+        if (rendered.warnings.isNotEmpty()) confidence -= min(0.18, rendered.warnings.size * 0.06)
         if (alphanumericCount < 20) confidence = min(confidence, 0.38)
         confidence = confidence.coerceIn(0.2, 0.97)
 
@@ -240,13 +471,27 @@ object OnDeviceOcr {
             sharpness = metrics.sharpness,
             enhancedImageUsed = enhancedImageUsed,
             warnings = warnings.distinct(),
+            recognitionConfidence = rendered.recognitionConfidence,
+            corrections = rendered.corrections,
         )
     }
 
-    private fun textEvidence(text: String, panel: LabelPanel): Int {
+    private fun textEvidence(rendered: RenderedPage, panel: LabelPanel): Int {
+        val text = rendered.text
         val alphanumeric = text.count(Char::isLetterOrDigit)
         val lines = text.lineSequence().count { it.isNotBlank() }
-        return alphanumeric + lines * 6 + keywordCount(text, panel) * 45
+        val confidence = (rendered.recognitionConfidence * 120).roundToInt()
+        val units = if (panel == LabelPanel.NUTRITION) {
+            Regex("(?i)\\d+(?:[.,]\\d+)?\\s*(?:kcal|kj|mg|mcg|g)\\b").findAll(text).count() * 18
+        } else {
+            0
+        }
+        val suspicious = if (panel == LabelPanel.NUTRITION) {
+            Regex("(?i)(?:m9|rn9|\\d\\s+9\\b|\\(9\\))").findAll(text).count() * 32
+        } else {
+            0
+        }
+        return alphanumeric + lines * 6 + keywordCount(text, panel) * 45 + confidence + units - suspicious
     }
 
     private fun keywordCount(text: String, panel: LabelPanel): Int {
@@ -287,4 +532,41 @@ object OnDeviceOcr {
         val sharpness: Int,
         val histogram: IntArray,
     )
+
+    private data class RecognizedElement(
+        val text: String,
+        val boundingBox: Rect?,
+        val confidence: Double?,
+    )
+
+    private data class RecognizedLine(
+        val text: String,
+        val boundingBox: Rect?,
+        val confidence: Double?,
+        val elements: List<RecognizedElement>,
+    )
+
+    private data class RecognizedPage(
+        val lines: List<RecognizedLine>,
+        val fallbackText: String,
+    )
+
+    private data class RenderedRow(
+        val text: String,
+        val boundingBox: Rect?,
+        val confidence: Double?,
+    )
+
+    private data class RenderedPage(
+        val rows: List<RenderedRow>,
+        val fallbackText: String,
+        val corrections: List<String>,
+        val warnings: List<String>,
+    ) {
+        val text: String
+            get() = rows.joinToString("\n", transform = RenderedRow::text).ifBlank { fallbackText }
+
+        val recognitionConfidence: Double
+            get() = rows.mapNotNull(RenderedRow::confidence).average().takeIf { !it.isNaN() } ?: 0.45
+    }
 }

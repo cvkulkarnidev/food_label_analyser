@@ -1,8 +1,10 @@
 package com.cvkulkarnidev.foodlabel
 
+import android.app.Activity
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -89,6 +91,9 @@ import com.cvkulkarnidev.foodlabel.ui.theme.LabelWiseTheme
 import com.cvkulkarnidev.foodlabel.ui.theme.Rose
 import com.cvkulkarnidev.foodlabel.ui.theme.Sage
 import com.cvkulkarnidev.foodlabel.ui.theme.SoftGreen
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -201,6 +206,37 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
         val slot = pendingImageSlot
         if (saved && uri != null && slot != null) setSelectedImage(slot, uri)
     }
+    val documentScanner = remember {
+        val options = GmsDocumentScannerOptions.Builder()
+            .setGalleryImportAllowed(false)
+            .setPageLimit(1)
+            .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+            .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+            .build()
+        GmsDocumentScanning.getClient(options)
+    }
+    val scannerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val slot = pendingImageSlot
+            val data = result.data
+            if (slot != null && data != null) {
+                GmsDocumentScanningResult.fromActivityResultIntent(data)
+                    ?.pages
+                    ?.firstOrNull()
+                    ?.imageUri
+                    ?.let { setSelectedImage(slot, it) }
+            }
+        }
+    }
+
+    fun launchSystemCamera() {
+        createCameraUri().also { uri ->
+            pendingCameraUri = uri
+            cameraLauncher.launch(uri)
+        }
+    }
 
     fun requestImage(slot: ImageSlot) {
         val current = state as? ScreenState.ImageInput ?: return
@@ -209,10 +245,16 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
             galleryLauncher.launch("image/*")
             return
         }
-        createCameraUri().also { uri ->
-            pendingCameraUri = uri
-            cameraLauncher.launch(uri)
+        val activity = context as? Activity
+        if (activity == null) {
+            launchSystemCamera()
+            return
         }
+        documentScanner.getStartScanIntent(activity)
+            .addOnSuccessListener { sender ->
+                scannerLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }
+            .addOnFailureListener { launchSystemCamera() }
     }
 
     fun beginInput(mode: InputMode) {
@@ -326,8 +368,8 @@ private fun HomeScreen(
             Text("Analyze a label", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             CategorySelector(selectedCategory, onCategorySelected)
             ActionCard(
-                title = "Capture label",
-                subtitle = "Take separate photos of the nutrition and ingredient panels",
+                title = "Scan label",
+                subtitle = "Auto-crop and clean separate nutrition and ingredient photos",
                 icon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
                 primary = true,
                 enabled = selectedCategory != null,
@@ -361,7 +403,7 @@ private fun HomeScreen(
                     Column {
                         Text("Private by design", fontWeight = FontWeight.Bold, color = Forest)
                         Text(
-                            "OCR, image enhancement and scoring run on your phone. Your product photos are not uploaded.",
+                            "OCR, table reconstruction, image enhancement and scoring run on your phone. Your product photos are not uploaded.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = Forest.copy(alpha = 0.78f),
                         )
@@ -370,7 +412,7 @@ private fun HomeScreen(
             }
 
             Text(
-                "Tip: keep each panel flat, fill the frame with text, tap to focus, and avoid reflections.",
+                "Tip: keep each panel flat and fill the frame. Capture mode can correct perspective, remove shadows and apply a readable filter.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.58f),
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
@@ -499,7 +541,7 @@ private fun ImageInputScreen(
                 Column(Modifier.padding(15.dp)) {
                     Text("For better low-light OCR", fontWeight = FontWeight.Bold, color = Forest)
                     Text(
-                        "Use flash or a lamp, keep the phone parallel to the panel, fill the frame with text, tap to focus, and hold still. The app will also test an automatically brightened and sharpened version.",
+                        "Use a lamp, avoid glare and hold still. Capture mode can crop, correct perspective and remove shadows; OCR also compares the original with an enhanced pass and re-reads uncertain nutrition rows.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Forest.copy(alpha = 0.78f),
                     )
@@ -691,7 +733,7 @@ private fun ReadingScreen(
                 Text(category.label, color = Sage, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Dim or soft images are retried with automatic enhancement. Everything stays on this device.",
+                    "Dim images are enhanced, table rows are reconstructed by position, and uncertain rows are re-read at higher resolution on this device.",
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
                 )
@@ -743,7 +785,7 @@ private fun ResultScreen(
 @Composable
 private fun OcrQualityCard(report: LabelReport) {
     val assessment = report.ocrAssessment ?: return
-    val needsReview = assessment.needsReview
+    val needsReview = assessment.needsReview || report.extractionWarnings.isNotEmpty()
     val accent = if (needsReview) Rose else Sage
     Card(
         colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.11f)),
@@ -787,7 +829,8 @@ private fun OcrQualityCard(report: LabelReport) {
                     )
                 }
                 Text(
-                    "Estimated confidence ${(image.confidence * 100).roundToInt()}%" +
+                    "Overall ${(image.confidence * 100).roundToInt()}%" +
+                        (image.recognitionConfidence?.let { " • ML text ${(it * 100).roundToInt()}%" } ?: "") +
                         if (image.enhancedImageUsed) " • Enhanced OCR result used" else "",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
@@ -800,6 +843,22 @@ private fun OcrQualityCard(report: LabelReport) {
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
+                image.corrections.forEach { correction ->
+                    Text(
+                        "• $correction",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Forest,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+            }
+            report.extractionWarnings.forEach { warning ->
+                Text(
+                    "• $warning",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Rose,
+                    modifier = Modifier.padding(top = 5.dp),
+                )
             }
             if (needsReview) {
                 Spacer(Modifier.height(9.dp))

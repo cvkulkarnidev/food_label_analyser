@@ -214,4 +214,62 @@ class ProductLabelAnalyzerTest {
         assertTrue(lowQuality.confidence < baseline.confidence)
         assertTrue(kotlin.math.abs(lowQuality.score - 3.0) < kotlin.math.abs(baseline.score - 3.0))
     }
+
+    @Test
+    fun `repairs 9 only when it is in a gram unit position`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Fortified Cereal with Vitamin B9
+            Nutrition Information Per 100 9
+            Protein 6 9
+            Total Sugar 8.5 9
+            Sodium 240 m9
+            Ingredients: Whole grains, vitamin B9, salt
+            """.trimIndent(),
+        )
+
+        assertEquals(NutritionBasis.PER_100_G, report.nutritionBasis)
+        assertEquals(6.0, report.nutrition.proteinG ?: -1.0, 0.001)
+        assertEquals(8.5, report.nutrition.totalSugarG ?: -1.0, 0.001)
+        assertEquals(240.0, report.nutrition.sodiumMg ?: -1.0, 0.001)
+        assertTrue(report.rawText.contains("Vitamin B9"))
+        assertTrue(report.extractionWarnings.any { it.contains("trailing ‘9’") })
+    }
+
+    @Test
+    fun `does not silently split a merged protein 69 value`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Protein Mix
+            Nutrition Information Per 100 g
+            Protein 69
+            Total Fat 5 g
+            Ingredients: Soy protein, cocoa
+            """.trimIndent(),
+        )
+
+        assertEquals(69.0, report.nutrition.proteinG ?: -1.0, 0.001)
+        assertTrue(report.extractionWarnings.any { it.contains("merged ‘g/9’") })
+    }
+
+    @Test
+    fun `excludes cross-field values that cannot be true`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Test Food
+            Nutrition Information Per 100 g
+            Carbohydrate 20 g
+            Total Sugar 35 g
+            Added Sugar 40 g
+            Total Fat 8 g
+            Saturated Fat 18 g
+            Ingredients: Flour, sugar
+            """.trimIndent(),
+        )
+
+        assertEquals(null, report.nutrition.totalSugarG)
+        assertEquals(null, report.nutrition.addedSugarG)
+        assertEquals(null, report.nutrition.saturatedFatG)
+        assertTrue(report.extractionWarnings.size >= 2)
+    }
 }

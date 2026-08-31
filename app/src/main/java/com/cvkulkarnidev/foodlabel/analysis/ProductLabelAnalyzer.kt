@@ -12,7 +12,9 @@ object ProductLabelAnalyzer {
     ): LabelReport {
         val detected = LabelTextParser.parse(rawText)
         val parsed = selectedCategory?.let { detected.copy(category = it) } ?: detected
-        val result = HealthScorer.score(parsed, ocrAssessment?.confidence ?: 1.0)
+        val validationPenalty = (parsed.extractionWarnings.size * 0.06).coerceAtMost(0.30)
+        val effectiveOcrConfidence = (ocrAssessment?.confidence ?: 1.0) * (1.0 - validationPenalty)
+        val result = HealthScorer.score(parsed, effectiveOcrConfidence)
         return LabelReport(
             productName = parsed.productName,
             category = parsed.category,
@@ -27,7 +29,8 @@ object ProductLabelAnalyzer {
             factors = result.factors,
             peerComparison = CategoryBenchmark.compare(parsed.category, result.score),
             ocrAssessment = ocrAssessment,
-            rawText = rawText,
+            extractionWarnings = parsed.extractionWarnings,
+            rawText = NutritionTextNormalizer.normalize(rawText).text,
         )
     }
 }

@@ -12,6 +12,7 @@ internal data class ParsedLabel(
     val nutrition: NutritionFacts,
     val nutritionBasis: NutritionBasis,
     val servingSize: String?,
+    val extractionWarnings: List<String>,
 )
 
 internal object LabelTextParser {
@@ -19,12 +20,14 @@ internal object LabelTextParser {
     private val servingRegex = Regex("serv(?:ing|e)\\s*size\\s*[:\\-]?\\s*([0-9]+(?:[.,][0-9]+)?\\s*(?:g|ml))", RegexOption.IGNORE_CASE)
 
     fun parse(rawText: String): ParsedLabel {
-        val lines = rawText.lines()
+        val normalizedText = NutritionTextNormalizer.normalize(rawText)
+        val lines = normalizedText.text.lines()
             .map { it.replace(Regex("\\s+"), " ").trim() }
             .filter { it.isNotBlank() }
 
         val ingredients = extractIngredients(lines)
-        val nutrition = NutritionFacts(
+        val detectedBasis = detectBasis(lines)
+        val extractedNutrition = NutritionFacts(
             energyKcal = extractEnergy(lines),
             proteinG = extractNutrient(lines, listOf("protein"), "g"),
             carbohydrateG = extractNutrient(lines, listOf("total carbohydrate", "carbohydrate", "carbohydrates"), "g"),
@@ -36,17 +39,103 @@ internal object LabelTextParser {
             transFatG = extractNutrient(lines, listOf("trans fat", "transfat"), "g"),
             sodiumMg = extractSodium(lines),
         )
+        val validation = validateNutrition(extractedNutrition, detectedBasis)
 
         return ParsedLabel(
             productName = findProductName(lines),
             category = detectCategory(lines, ingredients),
             ingredients = ingredients,
             allergens = extractAllergens(lines),
-            nutrition = nutrition,
-            nutritionBasis = detectBasis(lines),
-            servingSize = servingRegex.find(rawText)?.groupValues?.get(1),
+            nutrition = validation.nutrition,
+            nutritionBasis = detectedBasis,
+            servingSize = servingRegex.find(normalizedText.text)?.groupValues?.get(1),
+            extractionWarnings = (normalizedText.corrections + validation.warnings).distinct(),
         )
     }
+
+    private fun validateNutrition(facts: NutritionFacts, basis: NutritionBasis): NutritionValidation {
+        val warnings = mutableListOf<String>()
+        var checked = facts
+        val isPerHundred = basis == NutritionBasis.PER_100_G || basis == NutritionBasis.PER_100_ML
+
+        fun plausibleGrams(name: String, value: Double?): Double? {
+            if (value == null) return null
+            if (value < 0 || (isPerHundred && value > 100.0)) {
+                warnings += "$name was read as ${format(value)} g, which is impossible ${basis.label}; it was excluded from scoring."
+                return null
+            }
+            return value
+        }
+
+        checked = checked.copy(
+            energyKcal = checked.energyKcal?.takeIf { value ->
+                val valid = value >= 0 && (!isPerHundred || value <= 1_000)
+                if (!valid) warnings += "Energy was read as ${format(value)} kcal, which is implausible ${basis.label}; it was excluded from scoring."
+                valid
+            },
+            proteinG = plausibleGrams("Protein", checked.proteinG),
+            carbohydrateG = plausibleGrams("Carbohydrate", checked.carbohydrateG),
+            totalSugarG = plausibleGrams("Total sugar", checked.totalSugarG),
+            addedSugarG = plausibleGrams("Added sugar", checked.addedSugarG),
+            fibreG = plausibleGrams("Fibre", checked.fibreG),
+            totalFatG = plausibleGrams("Total fat", checked.totalFatG),
+            saturatedFatG = plausibleGrams("Saturated fat", checked.saturatedFatG),
+            transFatG = plausibleGrams("Trans fat", checked.transFatG),
+            sodiumMg = checked.sodiumMg?.takeIf { value ->
+                val valid = value >= 0 && (!isPerHundred || value <= 50_000)
+                if (!valid) warnings += "Sodium was read as ${format(value)} mg, which is implausible ${basis.label}; it was excluded from scoring."
+                valid
+            },
+        )
+
+        if (checked.addedSugarG != null && checked.totalSugarG != null && checked.addedSugarG > checked.totalSugarG) {
+            warnings += "Added sugar exceeded total sugar, so the added-sugar value was excluded pending confirmation."
+            checked = checked.copy(addedSugarG = null)
+        }
+        if (checked.totalSugarG != null && checked.carbohydrateG != null && checked.totalSugarG > checked.carbohydrateG) {
+            warnings += "Total sugar exceeded carbohydrate, so the sugar value was excluded pending confirmation."
+            checked = checked.copy(totalSugarG = null, addedSugarG = null)
+        }
+        if (checked.saturatedFatG != null && checked.totalFatG != null && checked.saturatedFatG > checked.totalFatG) {
+            warnings += "Saturated fat exceeded total fat, so the saturated-fat value was excluded pending confirmation."
+            checked = checked.copy(saturatedFatG = null)
+        }
+        if (checked.transFatG != null && checked.totalFatG != null && checked.transFatG > checked.totalFatG) {
+            warnings += "Trans fat exceeded total fat, so the trans-fat value was excluded pending confirmation."
+            checked = checked.copy(transFatG = null)
+        }
+
+        if (isPerHundred) {
+            val macroTotal = listOfNotNull(
+                checked.proteinG,
+                checked.carbohydrateG,
+                checked.totalFatG,
+                checked.fibreG,
+            ).sum()
+            if (macroTotal > 115.0) {
+                warnings += "The extracted macronutrients total ${format(macroTotal)} g per 100 g/ml; verify that the correct table column was read."
+            }
+        }
+        if ((checked.proteinG ?: 0.0) >= 60.0) {
+            warnings += "Protein was read as ${format(checked.proteinG!!)} g; this unusually high value may be a merged ‘g/9’ OCR error."
+        }
+        if ((checked.fibreG ?: 0.0) >= 40.0) {
+            warnings += "Fibre was read as ${format(checked.fibreG!!)} g; confirm this unusually high value."
+        }
+        if ((checked.transFatG ?: 0.0) > 10.0) {
+            warnings += "Trans fat was read as ${format(checked.transFatG!!)} g; confirm this unusually high value."
+        }
+
+        return NutritionValidation(checked, warnings.distinct())
+    }
+
+    private fun format(value: Double): String =
+        if (value % 1.0 == 0.0) value.toInt().toString() else "%.1f".format(value)
+
+    private data class NutritionValidation(
+        val nutrition: NutritionFacts,
+        val warnings: List<String>,
+    )
 
     private fun findProductName(lines: List<String>): String {
         val ignored = Regex(

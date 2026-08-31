@@ -4,17 +4,23 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 
 ## What the MVP does
 
-- **Capture two photos** using the phone's camera: nutrition panel and ingredients panel
+- **Scan two photos** using ML Kit's on-device document scanner: nutrition panel and ingredients panel
 - **Upload two images** from the device for those same panels
 - Requires the user to select one of eight product categories before scanning
 - On-device OCR with Google ML Kit's bundled Latin text recognizer
+- Preserves word coordinates and ML recognition confidence instead of flattening OCR immediately
+- Reconstructs nutrition rows geometrically when labels and values are returned separately
 - Measures brightness, contrast, and focus separately for each image
-- For dim, low-contrast, or soft images, retries OCR on an automatically brightened, contrast-stretched, mildly sharpened grayscale copy and keeps the stronger result
+- Capture mode supports edge detection, perspective correction, cropping, filters, and shadow cleanup
+- For dim, low-contrast, or soft images, retries OCR on an enhanced copy and chooses using recognition confidence, nutrition keywords, and valid units
+- Re-reads up to six uncertain nutrition rows as enlarged crops
+- Applies context-limited unit repair (`9` → `g`, `m9` → `mg`) only in nutrition-unit positions; it never globally replaces the digit 9
+- Rejects impossible per-100 g/ml values and flags inconsistent relationships such as added sugar above total sugar
 - Extracts product name, ingredients, allergens, serving size, label basis, and common nutrition fields
 - Normalizes per-serving values to 100 g/ml when serving size is available
 - Gives an explainable 0.5–5.0 score with positive and negative factors
 - Shows where the score sits among similar India-market products
-- Shows confidence and raw OCR text so extraction errors are visible
+- Shows image quality, ML text confidence, automatic corrections, validation warnings, and raw OCR text
 - Shows a prominent per-image warning when the photo is dark, blurry, low contrast, or produces weak OCR evidence
 - Does not require internet or upload label photos
 
@@ -29,7 +35,7 @@ The scorer starts from a strong-but-not-perfect baseline and applies transparent
 - order and quality of ingredients
 - selected processing signals and labelled additives
 
-Incomplete OCR evidence pulls the result toward a neutral score of 3 rather than producing an unjustified high score. In v0.3.0, the image/OCR confidence also reduces scoring confidence, so a blurry photo cannot receive the same certainty as a clean extraction. This is general product guidance, not medical advice or a substitute for individual dietary requirements.
+Incomplete OCR evidence pulls the result toward a neutral score of 3 rather than producing an unjustified high score. Image quality, ML recognition confidence, and nutrition validation all reduce scoring confidence, so a blurry or internally inconsistent extraction cannot receive the same certainty as clean evidence. This is general product guidance, not medical advice or a substitute for individual dietary requirements.
 
 Image enhancement is deliberately conservative. It can expose existing edges and improve readable low-light text, but it does not claim to reconstruct information lost to severe motion blur, glare, or darkness. The app explicitly recommends recapture when the quality estimate remains poor. This follows [ML Kit's image guidance](https://developers.google.com/ml-kit/vision/text-recognition/v2/android): sufficient pixels per character and good focus are still required for reliable text recognition.
 
@@ -75,6 +81,7 @@ Every push to `main` also runs Android CI and publishes a downloadable `labelwis
 ## Current limitations
 
 - OCR model is optimized for Latin-script labels.
+- Contextual correction can safely repair a separated `6 9` as `6 g`, but a merged `69` cannot always be resolved automatically. Unusually high values are explicitly flagged for confirmation.
 - Both the nutrition and ingredient photos are required. Each panel should fill most of its image.
 - Highly distorted tables, glare, and multiple nutrition columns can reduce extraction quality.
 - The category is user-selected rather than inferred, so choosing the wrong category produces the wrong peer group.
