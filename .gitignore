@@ -1,0 +1,13 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/.kotlin/
+/build/
+**/build/
+/captures/
+*.jks
+*.keystore
+/ppocr-sdk/src/main/assets/models/det/inference.onnx
+/ppocr-sdk/src/main/assets/models/rec/inference.onnx
+/ppocr-sdk/src/main/assets/models/rec/inference.yml
