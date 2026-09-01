@@ -304,8 +304,15 @@ object OnDeviceOcr {
         )
     }
 
-    private fun rowPreference(row: RenderedRow): Int =
-        rowEvidence(row) + if (row.engine == OcrEngine.PADDLE) 3 else 0
+    private fun rowPreference(row: RenderedRow): Int {
+        val labelCount = nutritionLabelCount(row.text)
+        val mergedRowPenalty = (labelCount - 1).coerceAtLeast(0) * 30
+        val headerLeakPenalty = if (labelCount > 0 && isBasisRow(row.text)) 20 else 0
+        return rowEvidence(row) +
+            (if (row.engine == OcrEngine.PADDLE) 3 else 0) -
+            mergedRowPenalty -
+            headerLeakPenalty
+    }
 
     private fun nutritionRowKey(text: String): String? {
         val normalized = text.lowercase()
@@ -487,9 +494,16 @@ object OnDeviceOcr {
         return score
     }
 
-    private fun isNutritionRow(text: String): Boolean = Regex(
-        "(?i)\\b(?:energy|calories?|protein|carbohydrates?|sugars?|fib(?:re|er)|fat|sodium|salt)\\b",
-    ).containsMatchIn(text)
+    private val nutritionLabelPattern = Regex(
+        "(?i)\\b(?:energy|calories?|protein|carbohydrates?|total sugars?|added sugars?|sugars?|" +
+            "dietary fib(?:re|er)|fib(?:re|er)|total fat|saturated fat|trans fat|sodium|salt)\\b",
+    )
+
+    private fun isNutritionRow(text: String): Boolean =
+        nutritionLabelPattern.containsMatchIn(text)
+
+    private fun nutritionLabelCount(text: String): Int =
+        nutritionLabelPattern.findAll(text).count()
 
     private fun isBasisRow(text: String): Boolean =
         Regex("(?i)\\bper\\s*(?:100|serv(?:e|ing)|pack)").containsMatchIn(text)
