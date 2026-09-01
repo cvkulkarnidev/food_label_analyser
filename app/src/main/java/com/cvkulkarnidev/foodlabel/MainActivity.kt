@@ -1,6 +1,7 @@
 package com.cvkulkarnidev.foodlabel
 
 import android.app.Activity
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -46,6 +48,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -53,9 +56,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -70,6 +75,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,6 +84,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import coil3.compose.AsyncImage
+import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertMatch
+import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertPreferences
+import com.cvkulkarnidev.foodlabel.analysis.IngredientAlerts
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
 import com.cvkulkarnidev.foodlabel.model.LabelReport
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
@@ -88,8 +98,6 @@ import com.cvkulkarnidev.foodlabel.ocr.OnDeviceOcr
 import com.cvkulkarnidev.foodlabel.ui.theme.Amber
 import com.cvkulkarnidev.foodlabel.ui.theme.Forest
 import com.cvkulkarnidev.foodlabel.ui.theme.LabelWiseTheme
-import com.cvkulkarnidev.foodlabel.ui.theme.Rose
-import com.cvkulkarnidev.foodlabel.ui.theme.Sage
 import com.cvkulkarnidev.foodlabel.ui.theme.SoftGreen
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
@@ -153,6 +161,14 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var pendingImageSlot by remember { mutableStateOf<ImageSlot?>(null) }
     var selectedCategory by rememberSaveable { mutableStateOf<ProductCategory?>(null) }
+    var ingredientAlertPreferences by remember(context) {
+        mutableStateOf(loadIngredientAlertPreferences(context))
+    }
+
+    fun updateIngredientAlertPreferences(preferences: IngredientAlertPreferences) {
+        ingredientAlertPreferences = preferences
+        saveIngredientAlertPreferences(context, preferences)
+    }
 
     fun setSelectedImage(slot: ImageSlot, uri: Uri) {
         val current = state as? ScreenState.ImageInput ?: return
@@ -269,6 +285,8 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 modifier = Modifier.padding(padding),
                 selectedCategory = selectedCategory,
                 onCategorySelected = { selectedCategory = it },
+                ingredientAlertPreferences = ingredientAlertPreferences,
+                onIngredientAlertPreferencesChanged = ::updateIngredientAlertPreferences,
                 onCapture = { beginInput(InputMode.CAPTURE) },
                 onUpload = { beginInput(InputMode.UPLOAD) },
             )
@@ -294,6 +312,7 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 modifier = Modifier.padding(padding),
                 uri = current.nutritionUri,
                 report = current.report,
+                ingredientAlertPreferences = ingredientAlertPreferences,
                 onBack = { state = ScreenState.Home },
                 onCapture = { beginInput(InputMode.CAPTURE) },
                 onUpload = { beginInput(InputMode.UPLOAD) },
@@ -315,6 +334,8 @@ private fun HomeScreen(
     modifier: Modifier = Modifier,
     selectedCategory: ProductCategory?,
     onCategorySelected: (ProductCategory) -> Unit,
+    ingredientAlertPreferences: IngredientAlertPreferences,
+    onIngredientAlertPreferencesChanged: (IngredientAlertPreferences) -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
@@ -367,6 +388,10 @@ private fun HomeScreen(
         ) {
             Text("Analyze a label", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             CategorySelector(selectedCategory, onCategorySelected)
+            IngredientAlertPreferencesCard(
+                preferences = ingredientAlertPreferences,
+                onPreferencesChanged = onIngredientAlertPreferencesChanged,
+            )
             ActionCard(
                 title = "Scan label",
                 subtitle = "Auto-crop and clean separate nutrition and ingredient photos",
@@ -388,7 +413,7 @@ private fun HomeScreen(
                 Text(
                     "Select a product category to enable capture and upload.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Rose,
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 4.dp),
                 )
             }
@@ -421,6 +446,153 @@ private fun HomeScreen(
     }
 }
 
+
+@Composable
+private fun IngredientAlertPreferencesCard(
+    preferences: IngredientAlertPreferences,
+    onPreferencesChanged: (IngredientAlertPreferences) -> Unit,
+) {
+    var dialogOpen by rememberSaveable { mutableStateOf(false) }
+    var draftIds by remember { mutableStateOf(preferences.enabledPresetIds) }
+    var customInput by remember { mutableStateOf(preferences.customTerms.joinToString(", ")) }
+
+    OutlinedButton(
+        onClick = {
+            draftIds = preferences.enabledPresetIds
+            customInput = preferences.customTerms.joinToString(", ")
+            dialogOpen = true
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(70.dp),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Icon(
+            Icons.Outlined.WarningAmber,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.tertiary,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            Text(
+                "MY INGREDIENT ALERTS",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+            )
+            Text(
+                "${preferences.enabledPresetIds.size} defaults" +
+                    if (preferences.customTerms.isEmpty()) "" else " + ${preferences.customTerms.size} custom",
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                "Tap to choose what gets highlighted",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+            )
+        }
+        Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null)
+    }
+    Text(
+        "These are personal watch items, not medical allergens. Declared allergens are shown separately.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.66f),
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
+
+    if (dialogOpen) {
+        AlertDialog(
+            onDismissRequest = { dialogOpen = false },
+            title = { Text("Ingredient alerts", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        "Choose ingredients you personally want flagged. All presets start enabled, and you can add your own terms.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    IngredientAlerts.presets.forEach { alert ->
+                        val checked = alert.id in draftIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    draftIds = if (checked) draftIds - alert.id else draftIds + alert.id
+                                }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = checked, onCheckedChange = null)
+                            Column(Modifier.weight(1f)) {
+                                Text(alert.label, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    alert.shortDescription,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = customInput,
+                        onValueChange = { customInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Custom ingredients") },
+                        supportingText = { Text("Separate up to 12 terms with commas or new lines.") },
+                        minLines = 2,
+                        maxLines = 4,
+                    )
+                    Text(
+                        "An alert means “check this ingredient,” not that the ingredient is unsafe for everyone. For a diagnosed allergy, always verify the original package.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onPreferencesChanged(
+                            IngredientAlertPreferences(
+                                enabledPresetIds = draftIds,
+                                customTerms = parseCustomIngredientAlerts(customInput),
+                            ),
+                        )
+                        dialogOpen = false
+                    },
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            draftIds = IngredientAlerts.defaultPresetIds
+                            customInput = ""
+                        },
+                    ) {
+                        Text("Reset defaults")
+                    }
+                    TextButton(onClick = { dialogOpen = false }) {
+                        Text("Cancel")
+                    }
+                }
+            },
+        )
+    }
+}
+
 @Composable
 private fun CategorySelector(
     selectedCategory: ProductCategory?,
@@ -434,7 +606,7 @@ private fun CategorySelector(
             .height(62.dp),
         shape = RoundedCornerShape(18.dp),
     ) {
-        Icon(Icons.Outlined.Category, contentDescription = null, tint = Forest)
+        Icon(Icons.Outlined.Category, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
             Text(
@@ -511,7 +683,7 @@ private fun ImageInputScreen(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text(state.category.label, color = Sage, fontWeight = FontWeight.Bold)
+            Text(state.category.label, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             Text(
                 "Use two separate photos so the nutrition values and the full ingredient list are both large enough to read.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -539,11 +711,11 @@ private fun ImageInputScreen(
                 shape = RoundedCornerShape(18.dp),
             ) {
                 Column(Modifier.padding(15.dp)) {
-                    Text("For better low-light OCR", fontWeight = FontWeight.Bold, color = Forest)
+                    Text("For better low-light OCR", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
                         "Use a lamp, avoid glare and hold still. Capture mode can crop, correct perspective and remove shadows; the app compares ML Kit with PaddleOCR, tests an enhanced image when needed, and re-reads uncertain nutrition rows.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Forest.copy(alpha = 0.78f),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                     )
                 }
             }
@@ -555,7 +727,7 @@ private fun ImageInputScreen(
                     .fillMaxWidth()
                     .height(54.dp),
                 shape = RoundedCornerShape(17.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Forest),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
                 Icon(Icons.Outlined.HealthAndSafety, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
@@ -622,7 +794,7 @@ private fun ImageSlotCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(title, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                     if (uri != null) {
-                        Icon(Icons.Outlined.CheckCircle, contentDescription = "Selected", tint = Sage, modifier = Modifier.size(22.dp))
+                        Icon(Icons.Outlined.CheckCircle, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
                     }
                 }
                 Spacer(Modifier.height(3.dp))
@@ -634,7 +806,7 @@ private fun ImageSlotCard(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     if (uri == null) "${mode.action} photo" else "${mode.action} a replacement",
-                    color = Forest,
+                    color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                 )
@@ -730,7 +902,7 @@ private fun ReadingScreen(
                 Spacer(Modifier.height(28.dp))
                 Text("Checking image quality and reading both panels…", fontSize = 19.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(8.dp))
-                Text(category.label, color = Sage, fontWeight = FontWeight.SemiBold)
+                Text(category.label, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Dim images are enhanced, table rows are reconstructed by position, and uncertain rows are re-read at higher resolution on this device.",
@@ -747,6 +919,7 @@ private fun ResultScreen(
     modifier: Modifier,
     uri: Uri,
     report: LabelReport,
+    ingredientAlertPreferences: IngredientAlertPreferences,
     onBack: () -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
@@ -760,6 +933,9 @@ private fun ResultScreen(
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            val ingredientAlertMatches = remember(report.ingredients, ingredientAlertPreferences) {
+                IngredientAlerts.findMatches(report.ingredients, ingredientAlertPreferences)
+            }
             Spacer(Modifier.height(2.dp))
             ProductHeader(uri, report)
             OcrQualityCard(report)
@@ -767,7 +943,8 @@ private fun ResultScreen(
             PeerComparisonCard(report)
             FactorSection(report.factors)
             NutritionSection(report)
-            IngredientsSection(report)
+            IngredientAlertsSection(ingredientAlertMatches)
+            IngredientsSection(report, ingredientAlertMatches)
             RawTextSection(report.rawText)
             ScanAgainButtons(onCapture, onUpload)
             Text(
@@ -786,7 +963,7 @@ private fun ResultScreen(
 private fun OcrQualityCard(report: LabelReport) {
     val assessment = report.ocrAssessment ?: return
     val needsReview = assessment.needsReview || report.extractionWarnings.isNotEmpty()
-    val accent = if (needsReview) Rose else Sage
+    val accent = if (needsReview) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Card(
         colors = CardDefaults.cardColors(containerColor = accent.copy(alpha = 0.11f)),
         shape = RoundedCornerShape(22.dp),
@@ -825,7 +1002,7 @@ private fun OcrQualityCard(report: LabelReport) {
                         image.quality.label,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (image.quality == com.cvkulkarnidev.foodlabel.model.OcrQuality.GOOD) Sage else Rose,
+                        color = if (image.quality == com.cvkulkarnidev.foodlabel.model.OcrQuality.GOOD) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     )
                 }
                 Text(
@@ -842,7 +1019,7 @@ private fun OcrQualityCard(report: LabelReport) {
                     Text(
                         "• $warning",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Rose,
+                        color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
@@ -850,7 +1027,7 @@ private fun OcrQualityCard(report: LabelReport) {
                     Text(
                         "• $correction",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Forest,
+                        color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(top = 3.dp),
                     )
                 }
@@ -859,7 +1036,7 @@ private fun OcrQualityCard(report: LabelReport) {
                 Text(
                     "• $warning",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Rose,
+                    color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 5.dp),
                 )
             }
@@ -887,7 +1064,7 @@ private fun PeerComparisonCard(report: LabelReport) {
             Text("Compared with similar products", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.Bottom) {
-                Text("${comparison.percentile}%", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, color = Forest)
+                Text("${comparison.percentile}%", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(9.dp))
                 Text(
                     "CATEGORY PERCENTILE",
@@ -904,11 +1081,11 @@ private fun PeerComparisonCard(report: LabelReport) {
                     .fillMaxWidth()
                     .height(9.dp)
                     .clip(CircleShape),
-                color = Forest,
-                trackColor = SoftGreen,
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.primaryContainer,
             )
             Spacer(Modifier.height(10.dp))
-            Text(comparison.position, fontWeight = FontWeight.Bold, color = Sage)
+            Text(comparison.position, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Text(
                 "Based on ${comparison.peerCount} valid ${report.category.label.lowercase()} rows from an 852-product India-market dataset.",
                 style = MaterialTheme.typography.bodySmall,
@@ -919,7 +1096,7 @@ private fun PeerComparisonCard(report: LabelReport) {
                 Text(
                     "Small peer set: treat this category rank as directional.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Rose,
+                    color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -947,7 +1124,7 @@ private fun ProductHeader(uri: Uri, report: LabelReport) {
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(report.productName, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(report.category.label, color = Sage, fontWeight = FontWeight.Medium)
+            Text(report.category.label, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
             Text(
                 "${(report.confidence * 100).roundToInt()}% extraction confidence",
                 style = MaterialTheme.typography.bodySmall,
@@ -1013,8 +1190,8 @@ private fun FactorRow(factor: ScoreFactor) {
     val neutral = factor.impact == 0.0
     val color = when {
         neutral -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-        factor.isPositive -> Sage
-        else -> Rose
+        factor.isPositive -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.error
     }
     Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.Top) {
         Icon(
@@ -1049,7 +1226,7 @@ private fun NutritionSection(report: LabelReport) {
                 append(report.nutritionBasis.label)
                 report.servingSize?.let { append(" • Serving size $it") }
             },
-            color = Sage,
+            color = MaterialTheme.colorScheme.primary,
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier.padding(bottom = 8.dp),
         )
@@ -1095,21 +1272,104 @@ private fun NutritionTile(label: String, value: String, modifier: Modifier = Mod
 }
 
 @Composable
-private fun IngredientsSection(report: LabelReport) {
-    SectionCard(title = "Ingredients & allergens") {
-        if (report.ingredients.isNullOrBlank()) {
+private fun IngredientAlertsSection(matches: List<IngredientAlertMatch>) {
+    SectionCard(title = "Your ingredient alerts") {
+        if (matches.isEmpty()) {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Text(
+                    "No selected alert ingredients were detected in the extracted ingredient list.",
+                    modifier = Modifier.padding(12.dp),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        } else {
+            Surface(
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Column(Modifier.padding(13.dp), verticalArrangement = Arrangement.spacedBy(11.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.WarningAmber, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "${matches.size} selected alert${if (matches.size == 1) "" else "s"} found",
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    matches.forEachIndexed { index, match ->
+                        if (index > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.22f))
+                        }
+                        Column {
+                            Text(match.label, fontWeight = FontWeight.Bold)
+                            Text(
+                                "Matched: ${match.matchedTerms.joinToString()}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                match.reason,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.82f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Personal alerts are not medical allergy detection and do not automatically change the health score.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+        )
+    }
+}
+
+@Composable
+private fun IngredientsSection(report: LabelReport, matches: List<IngredientAlertMatch>) {
+    SectionCard(title = "Ingredients & declared allergens") {
+        val ingredientText = report.ingredients
+        if (ingredientText.isNullOrBlank()) {
             Text("Ingredient list not detected.", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f))
         } else {
-            Text(report.ingredients, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
+            val highlightBackground = MaterialTheme.colorScheme.tertiaryContainer
+            val highlightForeground = MaterialTheme.colorScheme.onTertiaryContainer
+            val highlighted = buildAnnotatedString {
+                append(ingredientText)
+                matches
+                    .flatMap(IngredientAlertMatch::ranges)
+                    .distinct()
+                    .forEach { range ->
+                        addStyle(
+                            SpanStyle(
+                                background = highlightBackground,
+                                color = highlightForeground,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                            start = range.first,
+                            end = range.last + 1,
+                        )
+                    }
+            }
+            Text(highlighted, style = MaterialTheme.typography.bodyMedium, lineHeight = 21.sp)
         }
         if (report.allergens.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            Surface(color = Amber.copy(alpha = 0.2f), shape = RoundedCornerShape(12.dp)) {
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                shape = RoundedCornerShape(12.dp),
+            ) {
                 Text(
-                    "Allergens mentioned: ${report.allergens.joinToString()}",
+                    "Allergens mentioned on the label: ${report.allergens.joinToString()}",
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
                     fontWeight = FontWeight.SemiBold,
-                    color = Forest,
                 )
             }
         }
@@ -1165,7 +1425,7 @@ private fun ScanAgainButtons(onCapture: () -> Unit, onUpload: () -> Unit) {
                 .fillMaxWidth()
                 .height(52.dp),
             shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = Forest),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
         ) {
             Icon(Icons.Outlined.PhotoCamera, contentDescription = null)
             Spacer(Modifier.width(8.dp))
@@ -1215,7 +1475,7 @@ private fun ErrorScreen(
                 )
                 Spacer(Modifier.height(22.dp))
             }
-            Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = Rose, modifier = Modifier.size(42.dp))
+            Icon(Icons.Outlined.WarningAmber, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(42.dp))
             Spacer(Modifier.height(12.dp))
             Text("Label not readable", fontSize = 23.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
@@ -1243,9 +1503,49 @@ private fun SimpleTopBar(title: String, onBack: () -> Unit) {
     }
 }
 
+
+private const val INGREDIENT_ALERT_PREFERENCES = "ingredient_alert_preferences"
+private const val ENABLED_ALERT_IDS = "enabled_alert_ids"
+private const val CUSTOM_ALERT_TERMS = "custom_alert_terms"
+
+private fun loadIngredientAlertPreferences(context: Context): IngredientAlertPreferences {
+    val preferences = context.getSharedPreferences(INGREDIENT_ALERT_PREFERENCES, Context.MODE_PRIVATE)
+    return IngredientAlertPreferences(
+        enabledPresetIds = preferences.getStringSet(ENABLED_ALERT_IDS, null)
+            ?.toSet()
+            ?: IngredientAlerts.defaultPresetIds,
+        customTerms = preferences.getStringSet(CUSTOM_ALERT_TERMS, emptySet())
+            ?.toSet()
+            .orEmpty(),
+    )
+}
+
+private fun saveIngredientAlertPreferences(
+    context: Context,
+    preferences: IngredientAlertPreferences,
+) {
+    context.getSharedPreferences(INGREDIENT_ALERT_PREFERENCES, Context.MODE_PRIVATE)
+        .edit()
+        .putStringSet(ENABLED_ALERT_IDS, preferences.enabledPresetIds.toSet())
+        .putStringSet(CUSTOM_ALERT_TERMS, preferences.customTerms.toSet())
+        .apply()
+}
+
+private fun parseCustomIngredientAlerts(input: String): Set<String> {
+    val seen = mutableSetOf<String>()
+    return input
+        .split(Regex("[,\\n]"))
+        .map { it.trim() }
+        .filter { it.length in 2..40 }
+        .filter { seen.add(it.lowercase()) }
+        .take(12)
+        .toSet()
+}
+
+@Composable
 private fun scoreColor(score: Double): Color = when {
-    score >= 4.2 -> Color(0xFF237A52)
-    score >= 3.2 -> Color(0xFF5B792F)
-    score >= 2.2 -> Color(0xFFB36B13)
-    else -> Rose
+    score >= 4.2 -> MaterialTheme.colorScheme.primary
+    score >= 3.2 -> MaterialTheme.colorScheme.secondary
+    score >= 2.2 -> MaterialTheme.colorScheme.tertiary
+    else -> MaterialTheme.colorScheme.error
 }

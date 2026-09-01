@@ -1,12 +1,16 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.5.1 uses a 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.6.0 adds saved personal ingredient alerts and a high-contrast light/dark interface while retaining the 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
 
 ## What the MVP does
 
 - **Scan two photos** using ML Kit's on-device document scanner: nutrition panel and ingredients panel
 - **Upload two images** from the device for those same panels
 - Requires the user to select one of eight product categories before scanning
+- Saves an on-device personal ingredient-alert list; palm oil/palmolein, added sugar, maida/refined flour, hydrogenated fat, selected sweeteners, colours, preservatives and MSG are enabled by default
+- Lets the user disable any preset or add up to 12 custom ingredient terms
+- Highlights exact matched ingredient phrases and explains each alert separately from declared medical allergens
+- Uses explicit high-contrast semantic colours in both light and dark mode
 - Dual-engine on-device OCR with Google ML Kit and PaddleOCR PP-OCRv6 small (ONNX Runtime)
 - Preserves coordinates and recognition confidence from both engines instead of flattening OCR immediately
 - Compares both readings for every panel; nutrition rows are selected using confidence, valid units, nutrient labels, and g/9 suspicion penalties
@@ -36,7 +40,7 @@ The scorer starts from a strong-but-not-perfect baseline and applies transparent
 - order and quality of ingredients
 - selected processing signals and labelled additives
 
-Incomplete OCR evidence pulls the result toward a neutral score of 3 rather than producing an unjustified high score. Image quality, recognition confidence, OCR-engine disagreement, and nutrition validation all reduce scoring confidence, so a blurry or internally inconsistent extraction cannot receive the same certainty as clean evidence. This is general product guidance, not medical advice or a substitute for individual dietary requirements.
+Incomplete OCR evidence pulls the result toward a neutral score of 3 rather than producing an unjustified high score. Image quality, recognition confidence, OCR-engine disagreement, and nutrition validation all reduce scoring confidence, so a blurry or internally inconsistent extraction cannot receive the same certainty as clean evidence. This is general product guidance, not medical advice or a substitute for individual dietary requirements. Personal ingredient alerts are watchlist preferences only: they do not assert that an ingredient is unsafe, do not replace declared-allergen checking, and do not automatically alter the health score.
 
 Image enhancement is deliberately conservative. It can expose existing edges and improve readable low-light text, but it does not claim to reconstruct information lost to severe motion blur, glare, or darkness. The app explicitly recommends recapture when the quality estimate remains poor. This follows [ML Kit's image guidance](https://developers.google.com/ml-kit/vision/text-recognition/v2/android): sufficient pixels per character and good focus are still required for reliable text recognition.
 
