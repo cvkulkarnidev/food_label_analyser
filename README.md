@@ -1,6 +1,6 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.6.0 adds saved personal ingredient alerts and a high-contrast light/dark interface while retaining the 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.6.1 fixes nutrition-table header leakage and transitive row merging, while retaining saved ingredient alerts, high-contrast light/dark colours, and the 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
 
 ## What the MVP does
 
@@ -15,6 +15,8 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 - Preserves coordinates and recognition confidence from both engines instead of flattening OCR immediately
 - Compares both readings for every panel; nutrition rows are selected using confidence, valid units, nutrient labels, and g/9 suspicion penalties
 - Reconstructs nutrition rows geometrically when labels and values are returned separately
+- Prevents tall OCR boxes from transitively merging adjacent table rows
+- Ignores `per 100 g/ml` headers and %RDA figures when selecting a nutrient value, preferring unit-compatible measurements such as kcal, g and mg
 - Measures brightness, contrast, and focus separately for each image
 - Capture mode supports edge detection, perspective correction, cropping, filters, and shadow cleanup
 - For dim, low-contrast, or soft images, retries OCR on an enhanced copy and chooses using recognition confidence, nutrition keywords, and valid units

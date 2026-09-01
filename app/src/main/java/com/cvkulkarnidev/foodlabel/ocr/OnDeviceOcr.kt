@@ -344,7 +344,9 @@ object OnDeviceOcr {
         val groups = mutableListOf<MutableList<RecognizedLine>>()
         positioned.forEach { line ->
             val matching = groups.lastOrNull()?.takeIf { group ->
-                group.any { sameVisualRow(it.boundingBox!!, line.boundingBox!!) }
+                // Compare with a stable row anchor. Matching against any item lets a tall or
+                // slightly shifted box bridge adjacent rows and transitively collapse a table.
+                sameVisualRow(group.first().boundingBox!!, line.boundingBox!!)
             }
             if (matching != null) matching += line else groups += mutableListOf(line)
         }
@@ -378,8 +380,9 @@ object OnDeviceOcr {
         val overlap = min(first.bottom, second.bottom) - max(first.top, second.top)
         val smallerHeight = min(first.height(), second.height()).coerceAtLeast(1)
         val centerDistance = abs((first.top + first.bottom) - (second.top + second.bottom)) / 2.0
-        return overlap.toDouble() / smallerHeight >= 0.35 ||
-            centerDistance <= max(first.height(), second.height()) * 0.48
+        val overlapRatio = overlap.coerceAtLeast(0).toDouble() / smallerHeight
+        return overlapRatio >= 0.35 &&
+            centerDistance <= max(first.height(), second.height()) * 0.55
     }
 
     private fun joinElements(elements: List<RecognizedElement>): String {

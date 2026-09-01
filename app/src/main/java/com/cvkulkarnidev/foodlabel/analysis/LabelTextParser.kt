@@ -17,7 +17,11 @@ internal data class ParsedLabel(
 
 internal object LabelTextParser {
     private val numberRegex = Regex(
-        "(?<![A-Za-z])([0-9]+(?:[.,][0-9]+)?)\\s*(?:\\|\\s*)?(kcal|kj|mg|mcg|g)?",
+        "(?<![A-Za-z0-9])([0-9]+(?:[.,][0-9]+)?)\\s*(?:\\|\\s*)?(kcal|kj|mg|mcg|ml|g)?(?![A-Za-z0-9])",
+        RegexOption.IGNORE_CASE,
+    )
+    private val basisValueRegex = Regex(
+        "\\bper\\s*(?:\\|\\s*)?100\\s*(?:\\|\\s*)?(?:g|ml)\\b",
         RegexOption.IGNORE_CASE,
     )
     private val servingRegex = Regex(
@@ -210,17 +214,30 @@ internal object LabelTextParser {
     }
 
     private fun extractEnergy(lines: List<String>): Double? {
-        val hit = findValue(lines, listOf("energy", "calories")) ?: return null
+        val hit = findValue(
+            lines = lines,
+            aliases = listOf("energy", "calories"),
+            preferredUnits = setOf("kcal", "kj"),
+        ) ?: return null
         val (value, unit) = hit
         return if (unit.equals("kj", ignoreCase = true)) value / 4.184 else value
     }
 
     private fun extractSodium(lines: List<String>): Double? {
-        findValue(lines, listOf("sodium"))?.let { (value, unit) ->
-            return if (unit.equals("g", ignoreCase = true)) value * 1000.0 else value
+        findValue(lines, listOf("sodium"), preferredUnits = setOf("mg", "mcg", "g"))?.let { (value, unit) ->
+            return when {
+                unit.equals("g", ignoreCase = true) -> value * 1000.0
+                unit.equals("mcg", ignoreCase = true) -> value / 1000.0
+                else -> value
+            }
         }
-        findValue(lines, listOf("salt"))?.let { (value, unit) ->
-            return if (unit.equals("g", ignoreCase = true)) value * 400.0 else value * 0.4
+        findValue(lines, listOf("salt"), preferredUnits = setOf("mg", "mcg", "g"))?.let { (value, unit) ->
+            val saltMg = when {
+                unit.equals("g", ignoreCase = true) -> value * 1000.0
+                unit.equals("mcg", ignoreCase = true) -> value / 1000.0
+                else -> value
+            }
+            return saltMg * 0.4
         }
         return null
     }
@@ -231,10 +248,16 @@ internal object LabelTextParser {
         defaultUnit: String,
         excluded: List<String> = emptyList(),
     ): Double? {
-        val hit = findValue(lines, aliases, excluded) ?: return null
+        val hit = findValue(
+            lines = lines,
+            aliases = aliases,
+            excluded = excluded,
+            preferredUnits = setOf("g", "mg", "mcg"),
+        ) ?: return null
         val (value, unit) = hit
         return when {
             defaultUnit == "g" && unit.equals("mg", ignoreCase = true) -> value / 1000.0
+            defaultUnit == "g" && unit.equals("mcg", ignoreCase = true) -> value / 1_000_000.0
             else -> value
         }
     }
@@ -243,6 +266,7 @@ internal object LabelTextParser {
         lines: List<String>,
         aliases: List<String>,
         excluded: List<String> = emptyList(),
+        preferredUnits: Set<String>,
     ): Pair<Double, String?>? {
         for (index in lines.indices) {
             val lower = lines[index].lowercase()
@@ -250,20 +274,46 @@ internal object LabelTextParser {
             if (excluded.any(lower::contains)) continue
 
             val afterLabel = lines[index].substring(lower.indexOf(alias) + alias.length)
-            parseNumber(afterLabel)?.let { return it }
+            parseNumber(afterLabel, preferredUnits)?.let { return it }
 
             for (offset in 1..2) {
                 val nearby = lines.getOrNull(index + offset) ?: break
                 if (nearby.length > 28 || nearby.count(Char::isLetter) > 6) break
-                parseNumber(nearby)?.let { return it }
+                parseNumber(nearby, preferredUnits)?.let { return it }
             }
         }
         return null
     }
 
-    private fun parseNumber(text: String): Pair<Double, String?>? {
-        val match = numberRegex.find(text) ?: return null
-        val value = match.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return null
-        return value to match.groupValues.getOrNull(2)?.takeIf(String::isNotBlank)
+    private fun parseNumber(
+        text: String,
+        preferredUnits: Set<String>,
+    ): Pair<Double, String?>? {
+        val searchable = basisValueRegex.replace(text, " ")
+        val candidates = numberRegex.findAll(searchable).mapNotNull { match ->
+            val suffix = searchable
+                .substring(match.range.last + 1)
+                .trimStart()
+            if (suffix.startsWith("%")) return@mapNotNull null
+
+            val value = match.groupValues[1].replace(',', '.').toDoubleOrNull()
+                ?: return@mapNotNull null
+            val unit = match.groupValues
+                .getOrNull(2)
+                ?.takeIf(String::isNotBlank)
+                ?.lowercase()
+            NumberCandidate(value, unit)
+        }.toList()
+
+        val selected = candidates.firstOrNull { it.unit in preferredUnits }
+            ?: candidates.firstOrNull { it.unit == null }
+            ?: candidates.firstOrNull().takeIf { preferredUnits.isEmpty() }
+            ?: return null
+        return selected.value to selected.unit
     }
+
+    private data class NumberCandidate(
+        val value: Double,
+        val unit: String?,
+    )
 }

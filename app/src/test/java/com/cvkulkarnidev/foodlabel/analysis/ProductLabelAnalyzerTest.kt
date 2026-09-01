@@ -288,4 +288,57 @@ class ProductLabelAnalyzerTest {
         assertEquals(7.5, report.nutrition.proteinG ?: -1.0, 0.001)
         assertEquals(400.0, report.nutrition.sodiumMg ?: -1.0, 0.001)
     }
+
+    @Test
+    fun `ignores per 100 ml header inside a merged Fanta table row`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Fanta Orange
+            Nutrition information (approximate values)
+            SERVING = 200 ml : 3.8
+            SERVINGS IN THIS PACK
+            Energy | Carbohydrate | per 100 ml | 14 g | 56 kcal | %RDA* PER SERVE | 5.6%
+            Total sugars | 13.7 g
+            Added sugars | 13.7 g | 54.8%
+            Total fat | 0 g | 0%
+            Protein | 0 g
+            Sodium | 22.3 mg | 2.2%
+            Ingredients: Carbonated water, sugar, acidity regulator (330), stabilizers (414, 445), preservative (211), colour (110), flavours.
+            """.trimIndent(),
+            selectedCategory = ProductCategory.BEVERAGES_AND_JUICES,
+        )
+
+        assertEquals(NutritionBasis.PER_100_ML, report.nutritionBasis)
+        assertEquals(56.0, report.nutrition.energyKcal ?: -1.0, 0.001)
+        assertEquals(14.0, report.nutrition.carbohydrateG ?: -1.0, 0.001)
+        assertEquals(13.7, report.nutrition.totalSugarG ?: -1.0, 0.001)
+        assertEquals(22.3, report.nutrition.sodiumMg ?: -1.0, 0.001)
+    }
+
+    @Test
+    fun `skips percent values while finding a value on following OCR lines`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Fanta Orange
+            Nutrition information
+            per 100 ml
+            Energy
+            5.6%
+            56 kcal
+            Carbohydrate
+            14 g
+            Total sugars
+            13.7 g
+            Sodium
+            22.3 mg
+            Ingredients: Carbonated water, sugar
+            """.trimIndent(),
+            selectedCategory = ProductCategory.BEVERAGES_AND_JUICES,
+        )
+
+        assertEquals(56.0, report.nutrition.energyKcal ?: -1.0, 0.001)
+        assertEquals(14.0, report.nutrition.carbohydrateG ?: -1.0, 0.001)
+        assertEquals(13.7, report.nutrition.totalSugarG ?: -1.0, 0.001)
+        assertEquals(22.3, report.nutrition.sodiumMg ?: -1.0, 0.001)
+    }
 }
