@@ -38,7 +38,9 @@ internal object PaddleOcrEngine {
         initializationFailure?.let { return PaddleReadOutcome.Unavailable(it) }
 
         val ocr = engine ?: try {
-            check(OpenCVUtils.init(context.applicationContext)) { "OpenCV could not be initialized" }
+            check(OpenCVUtils.init(context.applicationContext)) {
+                OpenCVUtils.lastError ?: "OpenCV could not be initialized"
+            }
             PaddleOCR.create(
                 context = context.applicationContext,
                 config = PaddleOCRConfig(

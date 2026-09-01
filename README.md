@@ -1,6 +1,6 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.5.1 uses a 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
 
 ## What the MVP does
 

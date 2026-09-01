@@ -36,6 +36,27 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug
 
+      - name: Verify PaddleOCR packaging and 16 KB native alignment
+        run: |
+          set -euo pipefail
+          inspection_dir=$(mktemp -d)
+          unzip -q app/build/outputs/apk/debug/app-debug.apk \
+            'assets/models/*' 'lib/arm64-v8a/libopencv_java4.so' 'lib/arm64-v8a/libc++_shared.so' \
+            -d "$inspection_dir"
+          printf '%s  %s\n' \
+            'd73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e' \
+            "$inspection_dir/assets/models/det/inference.onnx" | sha256sum --check
+          printf '%s  %s\n' \
+            '5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634' \
+            "$inspection_dir/assets/models/rec/inference.onnx" | sha256sum --check
+          printf '%s  %s\n' \
+            'ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1' \
+            "$inspection_dir/assets/models/rec/inference.yml" | sha256sum --check
+          test "$(readelf -lW "$inspection_dir/lib/arm64-v8a/libopencv_java4.so" |
+            awk '$1 == "LOAD" { print $NF }' | sort -u)" = '0x4000'
+          test "$(readelf -lW "$inspection_dir/lib/arm64-v8a/libc++_shared.so" |
+            awk '$1 == "LOAD" { print $NF }' | sort -u)" = '0x4000'
+
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
