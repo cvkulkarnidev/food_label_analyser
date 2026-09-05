@@ -241,12 +241,12 @@ private fun NumericFieldRow(
     secondValue: String,
     onSecondChange: (String) -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        ReviewNumberField(firstLabel, firstValue, onFirstChange, Modifier.weight(1f))
-        ReviewNumberField(secondLabel, secondValue, onSecondChange, Modifier.weight(1f))
+        ReviewNumberField(firstLabel, firstValue, onFirstChange, Modifier.fillMaxWidth())
+        ReviewNumberField(secondLabel, secondValue, onSecondChange, Modifier.fillMaxWidth())
     }
 }
 
