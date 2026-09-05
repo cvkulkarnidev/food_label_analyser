@@ -6,12 +6,15 @@
         android:required="false" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="LabelWise"
+        android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.LabelWise">
+        android:theme="@style/Theme.LabelWise"
+        android:usesCleartextTraffic="false">
 
         <activity
             android:name=".MainActivity"
@@ -34,4 +37,3 @@
     </application>
 
 </manifest>
-

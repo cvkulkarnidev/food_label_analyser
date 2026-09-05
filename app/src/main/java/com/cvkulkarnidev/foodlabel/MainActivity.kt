@@ -66,7 +66,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -75,6 +74,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -83,18 +83,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertMatch
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertPreferences
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlerts
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
+import com.cvkulkarnidev.foodlabel.model.AnalysisReadiness
 import com.cvkulkarnidev.foodlabel.model.LabelReport
-import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.NutritionFacts
-import com.cvkulkarnidev.foodlabel.model.OcrAssessment
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
+import com.cvkulkarnidev.foodlabel.model.ReviewedLabelInput
 import com.cvkulkarnidev.foodlabel.model.ScoreFactor
-import com.cvkulkarnidev.foodlabel.ocr.OnDeviceOcr
 import com.cvkulkarnidev.foodlabel.ui.theme.Amber
 import com.cvkulkarnidev.foodlabel.ui.theme.Forest
 import com.cvkulkarnidev.foodlabel.ui.theme.LabelWiseTheme
@@ -104,9 +104,6 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import java.io.File
 import kotlin.math.roundToInt
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,7 +122,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private sealed interface ScreenState {
+internal sealed interface ScreenState {
     data object Home : ScreenState
     data class ImageInput(
         val mode: InputMode,
@@ -146,21 +143,19 @@ private sealed interface ScreenState {
     data class Error(val nutritionUri: Uri?, val message: String) : ScreenState
 }
 
-private enum class InputMode(val title: String, val action: String) {
+internal enum class InputMode(val title: String, val action: String) {
     CAPTURE("Capture both panels", "Capture"),
     UPLOAD("Upload both panels", "Choose"),
 }
 
-private enum class ImageSlot { NUTRITION, INGREDIENTS }
+internal enum class ImageSlot { NUTRITION, INGREDIENTS }
 
 @Composable
 private fun LabelWiseApp(createCameraUri: () -> Uri) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var state: ScreenState by remember { mutableStateOf(ScreenState.Home) }
-    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
-    var pendingImageSlot by remember { mutableStateOf<ImageSlot?>(null) }
-    var selectedCategory by rememberSaveable { mutableStateOf<ProductCategory?>(null) }
+    val appViewModel: LabelWiseViewModel = viewModel()
+    val state = appViewModel.screenState
+    val selectedCategory = appViewModel.selectedCategory
     var ingredientAlertPreferences by remember(context) {
         mutableStateOf(loadIngredientAlertPreferences(context))
     }
@@ -170,57 +165,14 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
         saveIngredientAlertPreferences(context, preferences)
     }
 
-    fun setSelectedImage(slot: ImageSlot, uri: Uri) {
-        val current = state as? ScreenState.ImageInput ?: return
-        state = when (slot) {
-            ImageSlot.NUTRITION -> current.copy(nutritionUri = uri)
-            ImageSlot.INGREDIENTS -> current.copy(ingredientsUri = uri)
-        }
-    }
-
-    fun analyze(nutritionUri: Uri, ingredientsUri: Uri, category: ProductCategory) {
-        state = ScreenState.Reading(nutritionUri, ingredientsUri, category)
-        scope.launch {
-            try {
-                val nutritionRead = OnDeviceOcr.read(context, nutritionUri, LabelPanel.NUTRITION)
-                val ingredientsRead = OnDeviceOcr.read(context, ingredientsUri, LabelPanel.INGREDIENTS)
-                val ingredientsText = if (
-                    Regex("^ingredients?\\b", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
-                        .containsMatchIn(ingredientsRead.text)
-                ) {
-                    ingredientsRead.text
-                } else {
-                    "Ingredients:\n${ingredientsRead.text}"
-                }
-                val rawText = "${nutritionRead.text}\n$ingredientsText".trim()
-                if (rawText.count(Char::isLetterOrDigit) < 24) {
-                    state = ScreenState.Error(
-                        nutritionUri,
-                        "I couldn't find enough readable text across the two photos. Retake both panels closer, in brighter light, and hold the phone steady.",
-                    )
-                    return@launch
-                }
-                val ocrAssessment = OcrAssessment(
-                    images = listOf(nutritionRead.assessment, ingredientsRead.assessment),
-                )
-                val report = withContext(Dispatchers.Default) {
-                    ProductLabelAnalyzer.analyze(rawText, category, ocrAssessment)
-                }
-                state = ScreenState.Result(nutritionUri, ingredientsUri, report)
-            } catch (error: Exception) {
-                state = ScreenState.Error(nutritionUri, error.message ?: "The images could not be analyzed.")
-            }
-        }
-    }
-
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        val slot = pendingImageSlot
-        if (uri != null && slot != null) setSelectedImage(slot, uri)
+        val slot = appViewModel.pendingImageSlot
+        if (uri != null && slot != null) appViewModel.setSelectedImage(slot, uri)
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
-        val uri = pendingCameraUri
-        val slot = pendingImageSlot
-        if (saved && uri != null && slot != null) setSelectedImage(slot, uri)
+        val uri = appViewModel.pendingCameraUri
+        val slot = appViewModel.pendingImageSlot
+        if (saved && uri != null && slot != null) appViewModel.setSelectedImage(slot, uri)
     }
     val documentScanner = remember {
         val options = GmsDocumentScannerOptions.Builder()
@@ -235,28 +187,28 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            val slot = pendingImageSlot
+            val slot = appViewModel.pendingImageSlot
             val data = result.data
             if (slot != null && data != null) {
                 GmsDocumentScanningResult.fromActivityResultIntent(data)
                     ?.pages
                     ?.firstOrNull()
                     ?.imageUri
-                    ?.let { setSelectedImage(slot, it) }
+                    ?.let { appViewModel.setSelectedImage(slot, it) }
             }
         }
     }
 
     fun launchSystemCamera() {
         createCameraUri().also { uri ->
-            pendingCameraUri = uri
+            appViewModel.setPendingImage(appViewModel.pendingImageSlot ?: return, uri)
             cameraLauncher.launch(uri)
         }
     }
 
     fun requestImage(slot: ImageSlot) {
-        val current = state as? ScreenState.ImageInput ?: return
-        pendingImageSlot = slot
+        val current = appViewModel.screenState as? ScreenState.ImageInput ?: return
+        appViewModel.setPendingImage(slot)
         if (current.mode == InputMode.UPLOAD) {
             galleryLauncher.launch("image/*")
             return
@@ -273,32 +225,28 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
             .addOnFailureListener { launchSystemCamera() }
     }
 
-    fun beginInput(mode: InputMode) {
-        selectedCategory?.let { state = ScreenState.ImageInput(mode = mode, category = it) }
-    }
-
-    BackHandler(enabled = state !is ScreenState.Home) { state = ScreenState.Home }
+    BackHandler(enabled = state !is ScreenState.Home) { appViewModel.returnHome() }
 
     Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
         when (val current = state) {
             ScreenState.Home -> HomeScreen(
                 modifier = Modifier.padding(padding),
                 selectedCategory = selectedCategory,
-                onCategorySelected = { selectedCategory = it },
+                onCategorySelected = appViewModel::selectCategory,
                 ingredientAlertPreferences = ingredientAlertPreferences,
                 onIngredientAlertPreferencesChanged = ::updateIngredientAlertPreferences,
-                onCapture = { beginInput(InputMode.CAPTURE) },
-                onUpload = { beginInput(InputMode.UPLOAD) },
+                onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
+                onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
             )
             is ScreenState.ImageInput -> ImageInputScreen(
                 modifier = Modifier.padding(padding),
                 state = current,
-                onBack = { state = ScreenState.Home },
+                onBack = appViewModel::returnHome,
                 onSelectImage = ::requestImage,
                 onAnalyze = {
                     val nutrition = current.nutritionUri
                     val ingredients = current.ingredientsUri
-                    if (nutrition != null && ingredients != null) analyze(nutrition, ingredients, current.category)
+                    if (nutrition != null && ingredients != null) appViewModel.analyze(nutrition, ingredients, current.category)
                 },
             )
             is ScreenState.Reading -> ReadingScreen(
@@ -306,24 +254,25 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 nutritionUri = current.nutritionUri,
                 ingredientsUri = current.ingredientsUri,
                 category = current.category,
-                onBack = { state = ScreenState.Home },
+                onBack = appViewModel::returnHome,
             )
             is ScreenState.Result -> ResultScreen(
                 modifier = Modifier.padding(padding),
                 uri = current.nutritionUri,
                 report = current.report,
                 ingredientAlertPreferences = ingredientAlertPreferences,
-                onBack = { state = ScreenState.Home },
-                onCapture = { beginInput(InputMode.CAPTURE) },
-                onUpload = { beginInput(InputMode.UPLOAD) },
+                onBack = appViewModel::returnHome,
+                onReportReviewed = appViewModel::review,
+                onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
+                onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
             )
             is ScreenState.Error -> ErrorScreen(
                 modifier = Modifier.padding(padding),
                 uri = current.nutritionUri,
                 message = current.message,
-                onBack = { state = ScreenState.Home },
-                onCapture = { beginInput(InputMode.CAPTURE) },
-                onUpload = { beginInput(InputMode.UPLOAD) },
+                onBack = appViewModel::returnHome,
+                onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
+                onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
             )
         }
     }
@@ -339,6 +288,7 @@ private fun HomeScreen(
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
+    val uriHandler = LocalUriHandler.current
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -428,10 +378,20 @@ private fun HomeScreen(
                     Column {
                         Text("Private by design", fontWeight = FontWeight.Bold, color = Forest)
                         Text(
-                            "OCR, table reconstruction, image enhancement and scoring run on your phone. Your product photos are not uploaded.",
+                            "OCR, image enhancement and scoring run on your phone. There is no account, advertising or analytics, and temporary camera photos are cleared when the session ends.",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = Forest.copy(alpha = 0.78f),
+                            color = Forest,
                         )
+                        TextButton(
+                            onClick = {
+                                uriHandler.openUri(
+                                    "https://github.com/cvkulkarnidev/food_label_analyser/blob/main/PRIVACY.md",
+                                )
+                            },
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                        ) {
+                            Text("Privacy policy & limitations", color = Forest, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -439,8 +399,15 @@ private fun HomeScreen(
             Text(
                 "Tip: keep each panel flat and fill the frame. Capture mode can correct perspective, remove shadows and apply a readable filter.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.58f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+            )
+            Text(
+                "LabelWise ${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
             )
         }
     }
@@ -464,7 +431,7 @@ private fun IngredientAlertPreferencesCard(
         },
         modifier = Modifier
             .fillMaxWidth()
-            .height(70.dp),
+            .heightIn(min = 70.dp),
         shape = RoundedCornerShape(18.dp),
     ) {
         Icon(
@@ -603,7 +570,7 @@ private fun CategorySelector(
         onClick = { dialogOpen = true },
         modifier = Modifier
             .fillMaxWidth()
-            .height(62.dp),
+            .heightIn(min = 62.dp),
         shape = RoundedCornerShape(18.dp),
     ) {
         Icon(Icons.Outlined.Category, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -725,7 +692,7 @@ private fun ImageInputScreen(
                 enabled = state.nutritionUri != null && state.ingredientsUri != null,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp),
+                    .heightIn(min = 54.dp),
                 shape = RoundedCornerShape(17.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) {
@@ -921,9 +888,21 @@ private fun ResultScreen(
     report: LabelReport,
     ingredientAlertPreferences: IngredientAlertPreferences,
     onBack: () -> Unit,
+    onReportReviewed: (ReviewedLabelInput) -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
+    var showReviewDialog by rememberSaveable { mutableStateOf(false) }
+    if (showReviewDialog) {
+        ReviewLabelDialog(
+            report = report,
+            onDismiss = { showReviewDialog = false },
+            onConfirm = {
+                onReportReviewed(it)
+                showReviewDialog = false
+            },
+        )
+    }
     Column(modifier.fillMaxSize()) {
         SimpleTopBar("Analysis", onBack)
         Column(
@@ -940,8 +919,24 @@ private fun ResultScreen(
             ProductHeader(uri, report)
             OcrQualityCard(report)
             ScoreCard(report)
-            PeerComparisonCard(report)
-            FactorSection(report.factors)
+            OutlinedButton(
+                onClick = { showReviewDialog = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Outlined.CheckCircle, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (report.wasUserReviewed) "Edit reviewed values" else "Review & correct extracted values",
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            if (report.readiness != AnalysisReadiness.INSUFFICIENT) {
+                PeerComparisonCard(report)
+                FactorSection(report.factors)
+            }
             NutritionSection(report)
             IngredientAlertsSection(ingredientAlertMatches)
             IngredientsSection(report, ingredientAlertMatches)
@@ -951,7 +946,7 @@ private fun ResultScreen(
                 "This score is general guidance based on the visible label—not medical advice. Individual needs and portion size still matter.",
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.58f),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 14.dp),
             )
             Spacer(Modifier.height(24.dp))
@@ -979,7 +974,11 @@ private fun OcrQualityCard(report: LabelReport) {
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (needsReview) "Check the OCR before trusting the score" else "Both photos look readable",
+                        when {
+                            report.wasUserReviewed -> "Original OCR reviewed and corrected"
+                            needsReview -> "Check the OCR before trusting the result"
+                            else -> "Both photos look readable"
+                        },
                         fontWeight = FontWeight.Bold,
                         color = accent,
                     )
@@ -1136,6 +1135,43 @@ private fun ProductHeader(uri: Uri, report: LabelReport) {
 
 @Composable
 private fun ScoreCard(report: LabelReport) {
+    if (report.readiness == AnalysisReadiness.INSUFFICIENT) {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer,
+            ),
+            shape = RoundedCornerShape(26.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                Icon(
+                    Icons.Outlined.WarningAmber,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.size(30.dp),
+                )
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(
+                        "Score withheld",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    Text(
+                        report.readinessMessage,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+        }
+        return
+    }
     val scoreColor = scoreColor(report.score)
     Card(
         colors = CardDefaults.cardColors(containerColor = scoreColor.copy(alpha = 0.12f)),
@@ -1162,13 +1198,22 @@ private fun ScoreCard(report: LabelReport) {
             }
             Spacer(Modifier.width(20.dp))
             Column(Modifier.weight(1f)) {
-                Text("Health score", style = MaterialTheme.typography.labelLarge, color = scoreColor)
+                Text(
+                    when {
+                        report.wasUserReviewed -> "Reviewed health score"
+                        report.readiness == AnalysisReadiness.REVIEW -> "Provisional health score"
+                        else -> "Health score"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = scoreColor,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text(report.verdict, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = scoreColor)
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    "Built from the nutrition values, ingredient order, and processing signals I could read.",
+                    report.readinessMessage,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.67f),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -1423,7 +1468,7 @@ private fun ScanAgainButtons(onCapture: () -> Unit, onUpload: () -> Unit) {
             onClick = onCapture,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp),
+                .heightIn(min = 52.dp),
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
         ) {
@@ -1435,7 +1480,7 @@ private fun ScanAgainButtons(onCapture: () -> Unit, onUpload: () -> Unit) {
             onClick = onUpload,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp),
+                .heightIn(min = 52.dp),
             shape = RoundedCornerShape(16.dp),
         ) {
             Icon(Icons.Outlined.PhotoLibrary, contentDescription = null)

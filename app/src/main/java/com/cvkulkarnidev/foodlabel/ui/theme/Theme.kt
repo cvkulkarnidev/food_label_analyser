@@ -13,7 +13,7 @@ val Amber = Color(0xFFF4B942)
 val Cream = Color(0xFFF8F5EC)
 val Ink = Color(0xFF18211E)
 val SoftGreen = Color(0xFFE4EFE8)
-val Rose = Color(0xFFB44343)
+val Rose = Color(0xFF9C2F33)
 
 private val LightColors = lightColorScheme(
     primary = Forest,
@@ -74,3 +74,4 @@ fun LabelWiseTheme(content: @Composable () -> Unit) {
         content = content,
     )
 }
+

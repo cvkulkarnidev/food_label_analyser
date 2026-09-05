@@ -64,6 +64,20 @@ enum class OcrQuality(val label: String) {
     POOR("Poor — recapture recommended"),
 }
 
+enum class AnalysisReadiness {
+    READY,
+    REVIEW,
+    INSUFFICIENT,
+}
+
+data class ReviewedLabelInput(
+    val productName: String,
+    val nutrition: NutritionFacts,
+    val nutritionBasis: NutritionBasis,
+    val servingSize: String?,
+    val ingredients: String?,
+)
+
 data class ImageOcrAssessment(
     val panel: LabelPanel,
     val quality: OcrQuality,
@@ -112,5 +126,9 @@ data class LabelReport(
     val peerComparison: PeerComparison,
     val ocrAssessment: OcrAssessment? = null,
     val extractionWarnings: List<String> = emptyList(),
+    val readiness: AnalysisReadiness = AnalysisReadiness.READY,
+    val readinessMessage: String = "",
+    val wasUserReviewed: Boolean = false,
     val rawText: String,
 )
+

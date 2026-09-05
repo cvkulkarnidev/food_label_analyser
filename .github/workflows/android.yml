@@ -12,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
 
     steps:
       - name: Check out source
@@ -33,8 +33,11 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - name: Run Android lint
+        run: ./gradlew lintDebug
+
+      - name: Build test APK and release bundle
+        run: ./gradlew assembleDebug bundleRelease
 
       - name: Verify PaddleOCR packaging and 16 KB native alignment
         run: |
@@ -60,8 +63,25 @@ jobs:
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: labelwise-debug-apk
+          name: labelwise-v1.0.0-test-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release candidate bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: labelwise-v1.0.0-unsigned-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labelwise-lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
           retention-days: 30
 

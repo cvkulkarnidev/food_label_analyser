@@ -1,6 +1,6 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 0.6.1 fixes nutrition-table header leakage and transitive row merging, while retaining saved ingredient alerts, high-contrast light/dark colours, and the 16 KB page-compatible OpenCV runtime for Android 15/16 devices.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 1.0.0 is a production candidate with explicit score-readiness gates, user-correctable OCR results, rotation-safe analysis, temporary-camera-file cleanup, higher-contrast semantic colours, release shrinking, lint enforcement, and an Android App Bundle build.
 
 ## What the MVP does
 
@@ -26,6 +26,8 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 - Extracts product name, ingredients, allergens, serving size, label basis, and common nutrition fields
 - Normalizes per-serving values to 100 g/ml when serving size is available
 - Gives an explainable 0.5–5.0 score with positive and negative factors
+- Withholds the score when too little comparable evidence was extracted and marks uncertain scores as provisional
+- Lets the user review and correct every extracted nutrition value, basis, serving size, product name and ingredient list before recalculating
 - Shows where the score sits among similar India-market products
 - Shows image quality, text confidence, engines compared, PaddleOCR contribution/latency, automatic corrections, validation warnings, and raw OCR text
 - Shows a prominent per-image warning when the photo is dark, blurry, low contrast, or produces weak OCR evidence
@@ -42,7 +44,7 @@ The scorer starts from a strong-but-not-perfect baseline and applies transparent
 - order and quality of ingredients
 - selected processing signals and labelled additives
 
-Incomplete OCR evidence pulls the result toward a neutral score of 3 rather than producing an unjustified high score. Image quality, recognition confidence, OCR-engine disagreement, and nutrition validation all reduce scoring confidence, so a blurry or internally inconsistent extraction cannot receive the same certainty as clean evidence. This is general product guidance, not medical advice or a substitute for individual dietary requirements. Personal ingredient alerts are watchlist preferences only: they do not assert that an ingredient is unsafe, do not replace declared-allergen checking, and do not automatically alter the health score.
+Incomplete OCR evidence pulls the internal estimate toward a neutral score of 3 rather than producing an unjustified high score. The UI withholds that estimate entirely when the basis is unknown or incomparable, fewer than two nutrition fields survive validation, the nutrition photo is poor, or confidence is too low. Borderline results are labelled provisional until reviewed. This is general product guidance, not medical advice or a substitute for individual dietary requirements. Personal ingredient alerts are watchlist preferences only: they do not assert that an ingredient is unsafe, do not replace declared-allergen checking, and do not automatically alter the health score.
 
 Image enhancement is deliberately conservative. It can expose existing edges and improve readable low-light text, but it does not claim to reconstruct information lost to severe motion blur, glare, or darkness. The app explicitly recommends recapture when the quality estimate remains poor. This follows [ML Kit's image guidance](https://developers.google.com/ml-kit/vision/text-recognition/v2/android): sufficient pixels per character and good focus are still required for reliable text recognition.
 
@@ -79,14 +81,16 @@ Requirements: JDK 17 and Android SDK 36.
 
 ```bash
 bash scripts/download_paddle_models.sh
-./gradlew testDebugUnitTest assembleDebug
+./gradlew testDebugUnitTest lintDebug assembleDebug bundleRelease
 ```
 
 The download script retrieves the official PP-OCRv6 small detector and recognizer, verifies the ONNX SHA-256 checksums, and places the assets in the PaddleOCR SDK module. The models add about 31 MB before APK compression. The PaddleOCR Android SDK source is Apache-2.0 licensed; attribution is in [`ppocr-sdk/NOTICE`](ppocr-sdk/NOTICE).
 
-The APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
+The test APK is generated at `app/build/outputs/apk/debug/app-debug.apk`. The release candidate bundle is generated at `app/build/outputs/bundle/release/app-release.aab`; it is unsigned unless all four `LABELWISE_KEYSTORE_*` environment variables documented in [the Play release checklist](docs/PLAY_STORE_CHECKLIST.md) are supplied.
 
-Every push to `main` also runs Android CI and publishes a downloadable `labelwise-debug-apk` workflow artifact.
+Every push to `main` runs unit tests and Android lint, verifies the packaged PaddleOCR models and 16 KB native alignment, and publishes a test APK plus an unsigned release-candidate AAB.
+
+See the [privacy policy](PRIVACY.md) and [Play release checklist](docs/PLAY_STORE_CHECKLIST.md) before public distribution.
 
 ## Current limitations
 
