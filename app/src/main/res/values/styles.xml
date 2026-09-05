@@ -6,7 +6,6 @@
         <item name="android:statusBarColor">@color/launcher_background</item>
         <item name="android:navigationBarColor">@color/launcher_background</item>
         <item name="android:windowBackground">@color/launcher_background</item>
-        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
 </resources>

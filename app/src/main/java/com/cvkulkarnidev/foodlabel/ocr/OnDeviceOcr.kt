@@ -2,9 +2,14 @@ package com.cvkulkarnidev.foodlabel.ocr
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
+import androidx.annotation.RequiresApi
+import androidx.exifinterface.media.ExifInterface
 import com.cvkulkarnidev.foodlabel.analysis.NutritionTextNormalizer
 import com.cvkulkarnidev.foodlabel.model.ImageOcrAssessment
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
@@ -120,6 +125,15 @@ object OnDeviceOcr {
     }
 
     private fun decodeBitmap(context: Context, uri: Uri): Bitmap {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            decodeBitmapWithImageDecoder(context, uri)
+        } else {
+            decodeLegacyBitmap(context, uri)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun decodeBitmapWithImageDecoder(context: Context, uri: Uri): Bitmap {
         val source = ImageDecoder.createSource(context.contentResolver, uri)
         return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
@@ -134,6 +148,38 @@ object OnDeviceOcr {
                 )
             }
         }
+    }
+
+    private fun decodeLegacyBitmap(context: Context, uri: Uri): Bitmap {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri).use { stream ->
+            requireNotNull(stream) { "The selected image could not be opened." }
+            BitmapFactory.decodeStream(stream, null, bounds)
+        }
+        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
+            "The selected image format is not supported."
+        }
+        var sampleSize = 1
+        while (max(bounds.outWidth, bounds.outHeight) / sampleSize > MAX_IMAGE_DIMENSION) {
+            sampleSize *= 2
+        }
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val decoded = context.contentResolver.openInputStream(uri).use { stream ->
+            requireNotNull(stream) { "The selected image could not be opened." }
+            BitmapFactory.decodeStream(stream, null, options)
+        } ?: error("The selected image could not be decoded.")
+
+        val rotation = context.contentResolver.openInputStream(uri).use { stream ->
+            stream?.let { ExifInterface(it).rotationDegrees } ?: 0
+        }
+        if (rotation == 0) return decoded
+
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            .also { rotated -> if (rotated !== decoded) decoded.recycle() }
     }
 
     private suspend fun recognize(
