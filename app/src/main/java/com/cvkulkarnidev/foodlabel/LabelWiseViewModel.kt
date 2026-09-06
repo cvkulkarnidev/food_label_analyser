@@ -8,6 +8,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
+import com.cvkulkarnidev.foodlabel.history.SavedAnalysis
+import com.cvkulkarnidev.foodlabel.history.SavedAnalysisSummary
+import com.cvkulkarnidev.foodlabel.history.ScanHistoryRepository
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.OcrAssessment
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
@@ -21,6 +24,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal class LabelWiseViewModel(application: Application) : AndroidViewModel(application) {
+    private val historyRepository = ScanHistoryRepository(application)
+
     var screenState by mutableStateOf<ScreenState>(ScreenState.Home)
         private set
 
@@ -33,9 +38,19 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
     var pendingImageSlot by mutableStateOf<ImageSlot?>(null)
         private set
 
+    var historyEntries by mutableStateOf<List<SavedAnalysisSummary>>(emptyList())
+        private set
+
+    var isHistoryLoading by mutableStateOf(false)
+        private set
+
     private var analysisJob: Job? = null
     private var nutritionFrameUris: List<Uri> = emptyList()
     private var ingredientsFrameUris: List<Uri> = emptyList()
+
+    init {
+        refreshHistory()
+    }
 
     fun selectCategory(category: ProductCategory) {
         selectedCategory = category
@@ -146,8 +161,68 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
     }
 
     fun review(input: ReviewedLabelInput) {
-        val current = screenState as? ScreenState.Result ?: return
-        screenState = current.copy(report = ProductLabelAnalyzer.review(current.report, input))
+        when (val current = screenState) {
+            is ScreenState.Result -> {
+                screenState = current.copy(report = ProductLabelAnalyzer.review(current.report, input))
+            }
+            is ScreenState.SavedResult -> {
+                val updatedReport = ProductLabelAnalyzer.review(current.analysis.report, input)
+                screenState = current.copy(analysis = current.analysis.copy(report = updatedReport))
+                viewModelScope.launch {
+                    withContext(Dispatchers.IO) {
+                        historyRepository.updateReport(current.analysis.id, updatedReport)
+                    }
+                    refreshHistory()
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    suspend fun saveCurrentAnalysis(name: String): Result<SavedAnalysis> {
+        val current = screenState as? ScreenState.Result
+            ?: return Result.failure(IllegalStateException("No current analysis is available to save."))
+        val outcome = withContext(Dispatchers.IO) {
+            runCatching {
+                val saved = historyRepository.save(
+                    requestedName = name,
+                    nutritionImage = current.nutritionUri,
+                    ingredientsImage = current.ingredientsUri,
+                    report = current.report,
+                )
+                saved to historyRepository.list()
+            }
+        }
+        outcome.onSuccess { (_, entries) -> historyEntries = entries }
+        return outcome.map { (saved) -> saved }
+    }
+
+    fun openHistory() {
+        analysisJob?.cancel()
+        screenState = ScreenState.History
+        refreshHistory()
+    }
+
+    fun openSavedAnalysis(id: String) {
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) { historyRepository.load(id) }
+            if (saved != null) {
+                selectedCategory = saved.report.category
+                screenState = ScreenState.SavedResult(saved)
+            }
+        }
+    }
+
+    fun deleteSavedAnalysis(id: String) {
+        viewModelScope.launch {
+            val entries = withContext(Dispatchers.IO) {
+                historyRepository.delete(id)
+                historyRepository.list()
+            }
+            historyEntries = entries
+            val current = screenState as? ScreenState.SavedResult
+            if (current?.analysis?.id == id) screenState = ScreenState.History
+        }
     }
 
     fun returnHome() {
@@ -166,6 +241,14 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
             .listFiles()
             ?.filter(File::isFile)
             ?.forEach(File::delete)
+    }
+
+    private fun refreshHistory() {
+        isHistoryLoading = true
+        viewModelScope.launch {
+            historyEntries = withContext(Dispatchers.IO) { historyRepository.list() }
+            isHistoryLoading = false
+        }
     }
 
     override fun onCleared() {

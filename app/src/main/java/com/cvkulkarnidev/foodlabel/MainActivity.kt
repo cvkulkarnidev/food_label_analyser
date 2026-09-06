@@ -27,21 +27,26 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Category
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HealthAndSafety
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.SaveAlt
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -92,7 +97,7 @@ import coil3.compose.AsyncImage
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertMatch
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertPreferences
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlerts
-import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
+import com.cvkulkarnidev.foodlabel.history.SavedAnalysisSummary
 import com.cvkulkarnidev.foodlabel.model.AnalysisReadiness
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.LabelReport
@@ -108,6 +113,8 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import java.io.File
+import java.text.DateFormat
+import java.util.Date
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -152,6 +159,8 @@ internal sealed interface ScreenState {
         val ingredientsUri: Uri,
         val report: LabelReport,
     ) : ScreenState
+    data object History : ScreenState
+    data class SavedResult(val analysis: com.cvkulkarnidev.foodlabel.history.SavedAnalysis) : ScreenState
     data class Error(val nutritionUri: Uri?, val message: String) : ScreenState
 }
 
@@ -167,6 +176,7 @@ private data class ReportSaveRequest(
     val ingredientsUri: Uri,
     val report: LabelReport,
     val alertMatches: List<IngredientAlertMatch>,
+    val instanceName: String? = null,
 )
 
 @Composable
@@ -207,6 +217,7 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                             ingredientsImage = request.ingredientsUri,
                             report = request.report,
                             alerts = request.alertMatches,
+                            instanceName = request.instanceName,
                         )
                     }
                 }
@@ -215,6 +226,22 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 )
             }
         }
+    }
+
+    fun exportPdf(
+        nutritionUri: Uri,
+        ingredientsUri: Uri,
+        report: LabelReport,
+        instanceName: String? = null,
+    ) {
+        pendingSaveRequest = ReportSaveRequest(
+            nutritionUri = nutritionUri,
+            ingredientsUri = ingredientsUri,
+            report = report,
+            alertMatches = IngredientAlerts.findMatches(report.ingredients, ingredientAlertPreferences),
+            instanceName = instanceName,
+        )
+        saveReportLauncher.launch(LabelReportPdfExporter.suggestedFileName(report, instanceName))
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = appViewModel.pendingCameraUri
@@ -279,7 +306,11 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     }
 
     BackHandler(enabled = state !is ScreenState.Home) {
-        if (state is ScreenState.SmartScan) appViewModel.cancelSmartScan() else appViewModel.returnHome()
+        when (state) {
+            is ScreenState.SmartScan -> appViewModel.cancelSmartScan()
+            is ScreenState.SavedResult -> appViewModel.openHistory()
+            else -> appViewModel.returnHome()
+        }
     }
 
     Scaffold(
@@ -293,6 +324,8 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 onCategorySelected = appViewModel::selectCategory,
                 ingredientAlertPreferences = ingredientAlertPreferences,
                 onIngredientAlertPreferencesChanged = ::updateIngredientAlertPreferences,
+                historyCount = appViewModel.historyEntries.size,
+                onHistory = appViewModel::openHistory,
                 onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
                 onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
             )
@@ -328,14 +361,47 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 ingredientAlertPreferences = ingredientAlertPreferences,
                 onBack = appViewModel::returnHome,
                 onReportReviewed = appViewModel::review,
-                onSave = {
-                    pendingSaveRequest = ReportSaveRequest(
-                        nutritionUri = current.nutritionUri,
-                        ingredientsUri = current.ingredientsUri,
-                        report = current.report,
-                        alertMatches = IngredientAlerts.findMatches(current.report.ingredients, ingredientAlertPreferences),
+                savedInstanceName = null,
+                onSaveToHistory = { name ->
+                    scope.launch {
+                        val result = appViewModel.saveCurrentAnalysis(name)
+                        snackbarHostState.showSnackbar(
+                            if (result.isSuccess) {
+                                "Saved to history as “${result.getOrThrow().name}”."
+                            } else {
+                                "Could not save this analysis: ${result.exceptionOrNull()?.message ?: "unknown error"}"
+                            },
+                        )
+                    }
+                },
+                onExportPdf = { exportPdf(current.nutritionUri, current.ingredientsUri, current.report) },
+                onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
+                onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
+            )
+            ScreenState.History -> HistoryScreen(
+                modifier = Modifier.padding(padding),
+                entries = appViewModel.historyEntries,
+                isLoading = appViewModel.isHistoryLoading,
+                onBack = appViewModel::returnHome,
+                onOpen = appViewModel::openSavedAnalysis,
+                onDelete = appViewModel::deleteSavedAnalysis,
+            )
+            is ScreenState.SavedResult -> ResultScreen(
+                modifier = Modifier.padding(padding),
+                nutritionUri = current.analysis.nutritionImage,
+                report = current.analysis.report,
+                ingredientAlertPreferences = ingredientAlertPreferences,
+                onBack = appViewModel::openHistory,
+                onReportReviewed = appViewModel::review,
+                savedInstanceName = current.analysis.name,
+                onSaveToHistory = null,
+                onExportPdf = {
+                    exportPdf(
+                        nutritionUri = current.analysis.nutritionImage,
+                        ingredientsUri = current.analysis.ingredientsImage,
+                        report = current.analysis.report,
+                        instanceName = current.analysis.name,
                     )
-                    saveReportLauncher.launch(LabelReportPdfExporter.suggestedFileName(current.report))
                 },
                 onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
                 onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
@@ -359,6 +425,8 @@ private fun HomeScreen(
     onCategorySelected: (ProductCategory) -> Unit,
     ingredientAlertPreferences: IngredientAlertPreferences,
     onIngredientAlertPreferencesChanged: (IngredientAlertPreferences) -> Unit,
+    historyCount: Int,
+    onHistory: () -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
@@ -431,6 +499,18 @@ private fun HomeScreen(
                 primary = false,
                 enabled = selectedCategory != null,
                 onClick = onUpload,
+            )
+            ActionCard(
+                title = "Saved analyses",
+                subtitle = if (historyCount == 0) {
+                    "Your saved products will appear here"
+                } else {
+                    "$historyCount saved ${if (historyCount == 1) "product" else "products"} — tap to reopen"
+                },
+                icon = { Icon(Icons.Outlined.History, contentDescription = null) },
+                primary = false,
+                enabled = true,
+                onClick = onHistory,
             )
 
             if (selectedCategory == null) {
@@ -960,6 +1040,187 @@ private fun ReadingScreen(
 }
 
 @Composable
+private fun HistoryScreen(
+    modifier: Modifier,
+    entries: List<SavedAnalysisSummary>,
+    isLoading: Boolean,
+    onBack: () -> Unit,
+    onOpen: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    var pendingDelete by remember { mutableStateOf<SavedAnalysisSummary?>(null) }
+    pendingDelete?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete saved analysis?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "“${entry.name}” and its two saved images will be permanently removed from this phone.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDelete(entry.id)
+                        pendingDelete = null
+                    },
+                ) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } },
+        )
+    }
+
+    Column(modifier.fillMaxSize()) {
+        SimpleTopBar("Saved analyses", onBack)
+        when {
+            isLoading && entries.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+            entries.isEmpty() -> Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Surface(
+                    color = SoftGreen,
+                    contentColor = Forest,
+                    shape = CircleShape,
+                    modifier = Modifier.size(76.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Outlined.History, contentDescription = null, modifier = Modifier.size(36.dp))
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+                Text("No saved analyses yet", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "After analyzing a product, tap Save to history. Its name, images and complete result will remain available here.",
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text(
+                        "${entries.size} saved ${if (entries.size == 1) "product" else "products"}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                items(entries, key = SavedAnalysisSummary::id) { entry ->
+                    SavedAnalysisCard(
+                        entry = entry,
+                        onOpen = { onOpen(entry.id) },
+                        onDelete = { pendingDelete = entry },
+                    )
+                }
+                item { Spacer(Modifier.height(12.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedAnalysisCard(
+    entry: SavedAnalysisSummary,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val savedAt = remember(entry.savedAtEpochMs) {
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(entry.savedAtEpochMs))
+    }
+    Card(
+        onClick = onOpen,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(22.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AsyncImage(
+                model = entry.nutritionImage,
+                contentDescription = "${entry.name} nutrition label",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(88.dp)
+                    .clip(RoundedCornerShape(16.dp)),
+            )
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    entry.name,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!entry.name.equals(entry.productName, ignoreCase = true)) {
+                    Text(
+                        entry.productName,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    entry.category.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(savedAt, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(7.dp))
+                Surface(
+                    color = if (entry.readiness == AnalysisReadiness.INSUFFICIENT) {
+                        MaterialTheme.colorScheme.errorContainer
+                    } else {
+                        scoreColor(entry.score).copy(alpha = 0.14f)
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                ) {
+                    Text(
+                        if (entry.readiness == AnalysisReadiness.INSUFFICIENT) {
+                            "Score withheld"
+                        } else {
+                            "${formatScore(entry.score)} / 5"
+                        },
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                        color = if (entry.readiness == AnalysisReadiness.INSUFFICIENT) {
+                            MaterialTheme.colorScheme.onErrorContainer
+                        } else {
+                            scoreColor(entry.score)
+                        },
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Outlined.DeleteOutline,
+                    contentDescription = "Delete ${entry.name}",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ResultScreen(
     modifier: Modifier,
     nutritionUri: Uri,
@@ -967,11 +1228,14 @@ private fun ResultScreen(
     ingredientAlertPreferences: IngredientAlertPreferences,
     onBack: () -> Unit,
     onReportReviewed: (ReviewedLabelInput) -> Unit,
-    onSave: () -> Unit,
+    savedInstanceName: String?,
+    onSaveToHistory: ((String) -> Unit)?,
+    onExportPdf: () -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
     var showReviewDialog by rememberSaveable { mutableStateOf(false) }
+    var showSaveDialog by rememberSaveable { mutableStateOf(false) }
     if (showReviewDialog) {
         ReviewLabelDialog(
             report = report,
@@ -979,6 +1243,16 @@ private fun ResultScreen(
             onConfirm = {
                 onReportReviewed(it)
                 showReviewDialog = false
+            },
+        )
+    }
+    if (showSaveDialog && onSaveToHistory != null) {
+        SaveAnalysisNameDialog(
+            suggestedName = report.productName,
+            onDismiss = { showSaveDialog = false },
+            onSave = { name ->
+                onSaveToHistory(name)
+                showSaveDialog = false
             },
         )
     }
@@ -995,6 +1269,26 @@ private fun ResultScreen(
                 IngredientAlerts.findMatches(report.ingredients, ingredientAlertPreferences)
             }
             Spacer(Modifier.height(2.dp))
+            savedInstanceName?.let { name ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SoftGreen),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 15.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.History, contentDescription = null, tint = Forest)
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text("SAVED ANALYSIS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Forest)
+                            Text(name, fontWeight = FontWeight.Bold, color = Forest)
+                        }
+                    }
+                }
+            }
             ProductHeader(nutritionUri, report)
             OcrQualityCard(report)
             ScoreCard(report)
@@ -1012,16 +1306,29 @@ private fun ResultScreen(
                     fontWeight = FontWeight.Bold,
                 )
             }
-            Button(
-                onClick = onSave,
+            if (onSaveToHistory != null) {
+                Button(
+                    onClick = { showSaveDialog = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Icon(Icons.Outlined.BookmarkAdd, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Save to history", fontWeight = FontWeight.Bold)
+                }
+            }
+            OutlinedButton(
+                onClick = onExportPdf,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 52.dp),
                 shape = RoundedCornerShape(16.dp),
             ) {
-                Icon(Icons.Outlined.SaveAlt, contentDescription = null)
+                Icon(Icons.Outlined.PictureAsPdf, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Save images and report (PDF)", fontWeight = FontWeight.Bold)
+                Text("Export PDF to phone", fontWeight = FontWeight.Bold)
             }
             if (report.readiness != AnalysisReadiness.INSUFFICIENT) {
                 PeerComparisonCard(report)
@@ -1042,6 +1349,47 @@ private fun ResultScreen(
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+@Composable
+private fun SaveAnalysisNameDialog(
+    suggestedName: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var name by rememberSaveable(suggestedName) {
+        mutableStateOf(suggestedName.take(80).ifBlank { "Saved analysis" })
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save analysis", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Give this product a name so you can identify it in your history.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(80) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("History name") },
+                    placeholder = { Text("Example: Fanta 750 ml") },
+                    supportingText = { Text("Stored privately on this phone with both images and the analysis.") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(name.trim()) },
+                enabled = name.isNotBlank(),
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -1679,6 +2027,9 @@ private fun parseCustomIngredientAlerts(input: String): Set<String> {
         .take(12)
         .toSet()
 }
+
+private fun formatScore(value: Double): String =
+    if (value % 1.0 == 0.0) value.toInt().toString() else "%.1f".format(java.util.Locale.US, value)
 
 @Composable
 private fun scoreColor(score: Double): Color = when {

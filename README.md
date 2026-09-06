@@ -1,6 +1,6 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 1.1.0 adds a three-second multi-frame Smart Scan, conservative perspective correction, frame-level OCR consensus, and user-chosen PDF export containing both label images and the complete analysis.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 1.2.0 adds named on-device scan history on top of the three-second multi-frame Smart Scan, perspective correction, frame-level OCR consensus, and PDF export.
 
 ## What the MVP does
 
@@ -32,7 +32,9 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 - Gives an explainable 0.5–5.0 score with positive and negative factors
 - Withholds the score when too little comparable evidence was extracted and marks uncertain scores as provisional
 - Lets the user review and correct every extracted nutrition value, basis, serving size, product name and ingredient list before recalculating
-- Saves a portable PDF through Android's system file picker with both final panel images, nutrition, ingredients, alerts, score factors, peer comparison, OCR confidence and review warnings
+- Saves a named analysis to private on-device history, including optimized copies of both panel images and the complete result
+- Lists saved products newest-first, reopens the original result, persists reviewed corrections, and supports confirmed deletion
+- Exports a separate portable PDF through Android's system file picker with both final panel images, nutrition, ingredients, alerts, score factors, peer comparison, OCR confidence and review warnings
 - Shows where the score sits among similar India-market products
 - Shows image quality, text confidence, engines compared, PaddleOCR contribution/latency, automatic corrections, validation warnings, and raw OCR text
 - Shows a prominent per-image warning when the photo is dark, blurry, low contrast, or produces weak OCR evidence
@@ -107,3 +109,4 @@ See the [privacy policy](PRIVACY.md) and [Play release checklist](docs/PLAY_STOR
 - The category is user-selected rather than inferred, so choosing the wrong category produces the wrong peer group.
 - The dairy benchmark currently has only 11 valid products and is marked as directional in the app.
 - The score is an explainable MVP heuristic and requires clinical/public-health validation before health-critical use.
+- Saved history belongs to this app installation. Deleting the app also deletes its private history, so export important results to PDF first.

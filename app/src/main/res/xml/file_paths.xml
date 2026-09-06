@@ -3,5 +3,7 @@
     <cache-path
         name="label_photos"
         path="label_photos/" />
+    <files-path
+        name="saved_analyses"
+        path="saved_analyses/" />
 </paths>
-
