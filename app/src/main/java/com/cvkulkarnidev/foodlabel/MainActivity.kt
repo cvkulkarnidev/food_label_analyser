@@ -94,6 +94,7 @@ import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertPreferences
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlerts
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
 import com.cvkulkarnidev.foodlabel.model.AnalysisReadiness
+import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.LabelReport
 import com.cvkulkarnidev.foodlabel.model.NutritionFacts
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
