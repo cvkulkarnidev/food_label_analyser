@@ -34,6 +34,8 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
         private set
 
     private var analysisJob: Job? = null
+    private var nutritionFrameUris: List<Uri> = emptyList()
+    private var ingredientsFrameUris: List<Uri> = emptyList()
 
     fun selectCategory(category: ProductCategory) {
         selectedCategory = category
@@ -43,6 +45,8 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
         val category = selectedCategory ?: return
         analysisJob?.cancel()
         clearCameraCache()
+        nutritionFrameUris = emptyList()
+        ingredientsFrameUris = emptyList()
         screenState = ScreenState.ImageInput(mode = mode, category = category)
     }
 
@@ -53,9 +57,41 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
 
     fun setSelectedImage(slot: ImageSlot, uri: Uri) {
         val current = screenState as? ScreenState.ImageInput ?: return
+        when (slot) {
+            ImageSlot.NUTRITION -> nutritionFrameUris = listOf(uri)
+            ImageSlot.INGREDIENTS -> ingredientsFrameUris = listOf(uri)
+        }
         screenState = when (slot) {
             ImageSlot.NUTRITION -> current.copy(nutritionUri = uri)
             ImageSlot.INGREDIENTS -> current.copy(ingredientsUri = uri)
+        }
+    }
+
+    fun startSmartScan(slot: ImageSlot) {
+        val current = screenState as? ScreenState.ImageInput ?: return
+        pendingImageSlot = slot
+        screenState = ScreenState.SmartScan(current, slot)
+    }
+
+    fun cancelSmartScan() {
+        val current = screenState as? ScreenState.SmartScan ?: return
+        screenState = current.input
+    }
+
+    fun completeSmartScan(frameUris: List<Uri>) {
+        val current = screenState as? ScreenState.SmartScan ?: return
+        val usable = frameUris.distinct().take(3)
+        if (usable.isEmpty()) {
+            screenState = current.input
+            return
+        }
+        when (current.slot) {
+            ImageSlot.NUTRITION -> nutritionFrameUris = usable
+            ImageSlot.INGREDIENTS -> ingredientsFrameUris = usable
+        }
+        screenState = when (current.slot) {
+            ImageSlot.NUTRITION -> current.input.copy(nutritionUri = usable.first())
+            ImageSlot.INGREDIENTS -> current.input.copy(ingredientsUri = usable.first())
         }
     }
 
@@ -65,8 +101,16 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
         analysisJob = viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
-                val nutritionRead = OnDeviceOcr.read(context, nutritionUri, LabelPanel.NUTRITION)
-                val ingredientsRead = OnDeviceOcr.read(context, ingredientsUri, LabelPanel.INGREDIENTS)
+                val nutritionRead = OnDeviceOcr.read(
+                    context,
+                    nutritionFrameUris.ifEmpty { listOf(nutritionUri) },
+                    LabelPanel.NUTRITION,
+                )
+                val ingredientsRead = OnDeviceOcr.read(
+                    context,
+                    ingredientsFrameUris.ifEmpty { listOf(ingredientsUri) },
+                    LabelPanel.INGREDIENTS,
+                )
                 val ingredientsText = if (
                     Regex("^ingredients?\\b", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
                         .containsMatchIn(ingredientsRead.text)
@@ -111,6 +155,8 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
         analysisJob = null
         pendingCameraUri = null
         pendingImageSlot = null
+        nutritionFrameUris = emptyList()
+        ingredientsFrameUris = emptyList()
         screenState = ScreenState.Home
         clearCameraCache()
     }
@@ -131,4 +177,3 @@ internal class LabelWiseViewModel(application: Application) : AndroidViewModel(a
         const val CAMERA_CACHE_DIRECTORY = "label_photos"
     }
 }
-

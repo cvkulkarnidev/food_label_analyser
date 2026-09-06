@@ -1,10 +1,12 @@
 # LabelWise — Food Label Analyzer
 
-LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 1.0.0 is a production candidate with explicit score-readiness gates, user-correctable OCR results, rotation-safe analysis, temporary-camera-file cleanup, higher-contrast semantic colours, release shrinking, lint enforcement, and an Android App Bundle build.
+LabelWise is a native Android app that reads a packaged-food label and returns an explainable health score out of 5 plus a category-specific peer percentile. Processing stays on the device. Version 1.1.0 adds a three-second multi-frame Smart Scan, conservative perspective correction, frame-level OCR consensus, and user-chosen PDF export containing both label images and the complete analysis.
 
 ## What the MVP does
 
-- **Scan two photos** using ML Kit's on-device document scanner: nutrition panel and ingredients panel
+- **Smart Scan two panels** for three seconds each: nutrition panel and ingredients panel
+- Scores live frames for focus, exposure, contrast, glare and stability, retaining up to three high-quality complementary frames instead of recording a video
+- Keeps ML Kit document-style single capture as a fallback when Smart Scan is unavailable or the user prefers it
 - **Upload two images** from the device for those same panels
 - Requires the user to select one of eight product categories before scanning
 - Saves an on-device personal ingredient-alert list; palm oil/palmolein, added sugar, maida/refined flour, hydrogenated fat, selected sweeteners, colours, preservatives and MSG are enabled by default
@@ -18,7 +20,9 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 - Prevents tall OCR boxes from transitively merging adjacent table rows
 - Ignores `per 100 g/ml` headers and %RDA figures when selecting a nutrient value, preferring unit-compatible measurements such as kcal, g and mg
 - Measures brightness, contrast, and focus separately for each image
-- Capture mode supports edge detection, perspective correction, cropping, filters, and shadow cleanup
+- Uses conservative OpenCV quadrilateral correction or line-based deskewing and keeps the original geometry when confidence is weak
+- Runs ML Kit over the selected frames, PaddleOCR on the strongest frame, and combines nutrition rows by field before parsing
+- Uses token-aligned consensus for ingredient text, where line wrapping commonly differs between frames
 - For dim, low-contrast, or soft images, retries OCR on an enhanced copy and chooses using recognition confidence, nutrition keywords, and valid units
 - Re-reads up to six uncertain nutrition rows as enlarged crops
 - Applies context-limited unit repair (`9` → `g`, `m9` → `mg`) only in nutrition-unit positions; it never globally replaces the digit 9
@@ -28,6 +32,7 @@ LabelWise is a native Android app that reads a packaged-food label and returns a
 - Gives an explainable 0.5–5.0 score with positive and negative factors
 - Withholds the score when too little comparable evidence was extracted and marks uncertain scores as provisional
 - Lets the user review and correct every extracted nutrition value, basis, serving size, product name and ingredient list before recalculating
+- Saves a portable PDF through Android's system file picker with both final panel images, nutrition, ingredients, alerts, score factors, peer comparison, OCR confidence and review warnings
 - Shows where the score sits among similar India-market products
 - Shows image quality, text confidence, engines compared, PaddleOCR contribution/latency, automatic corrections, validation warnings, and raw OCR text
 - Shows a prominent per-image warning when the photo is dark, blurry, low contrast, or produces weak OCR evidence
@@ -88,7 +93,7 @@ The download script retrieves the official PP-OCRv6 small detector and recognize
 
 The test APK is generated at `app/build/outputs/apk/debug/app-debug.apk`. The release candidate bundle is generated at `app/build/outputs/bundle/release/app-release.aab`; it is unsigned unless all four `LABELWISE_KEYSTORE_*` environment variables documented in [the Play release checklist](docs/PLAY_STORE_CHECKLIST.md) are supplied.
 
-Every push to `main` runs unit tests and Android lint, verifies the packaged PaddleOCR models and 16 KB native alignment, and publishes a test APK plus an unsigned release-candidate AAB.
+Every push to `main` and release-development branches runs unit tests and Android lint, verifies the packaged PaddleOCR models and 16 KB native alignment, and publishes a test APK plus an unsigned release-candidate AAB.
 
 See the [privacy policy](PRIVACY.md) and [Play release checklist](docs/PLAY_STORE_CHECKLIST.md) before public distribution.
 
@@ -97,7 +102,8 @@ See the [privacy policy](PRIVACY.md) and [Play release checklist](docs/PLAY_STOR
 - The OCR model is multilingual, but nutrition/ingredient parsing is currently optimized for English text and Latin-script labels.
 - Contextual correction can safely repair a separated `6 9` as `6 g`, but a merged `69` cannot always be resolved automatically. Unusually high values are explicitly flagged for confirmation.
 - Both the nutrition and ingredient photos are required. Each panel should fill most of its image.
-- Highly distorted tables, glare, and multiple nutrition columns can reduce extraction quality.
+- Smart Scan improves random focus, glare and recognition errors, but cannot reconstruct text that is unreadable in every selected frame.
+- Highly distorted tables and ambiguous multiple-column layouts can still require manual review.
 - The category is user-selected rather than inferred, so choosing the wrong category produces the wrong peer group.
 - The dairy benchmark currently has only 11 valid products and is marked as directional in the app.
 - The score is an explainable MVP heuristic and requires clinical/public-health validation before health-critical use.

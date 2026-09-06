@@ -91,6 +91,10 @@ data class ImageOcrAssessment(
     val enginesCompared: List<String> = listOf("ML Kit"),
     val paddleOcrContributed: Boolean = false,
     val paddleInferenceTimeMs: Long? = null,
+    val framesAnalyzed: Int = 1,
+    val consensusAgreement: Double? = null,
+    val perspectiveCorrected: Boolean = false,
+    val deskewed: Boolean = false,
 )
 
 data class OcrAssessment(
@@ -131,4 +135,3 @@ data class LabelReport(
     val wasUserReviewed: Boolean = false,
     val rawText: String,
 )
-

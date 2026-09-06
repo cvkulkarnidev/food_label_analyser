@@ -1,6 +1,6 @@
 # LabelWise Privacy Policy
 
-Effective date: 5 September 2026
+Effective date: 6 September 2026
 
 LabelWise analyses packaged-food labels on Android. The current app is designed to work without a LabelWise account or a LabelWise server.
 
@@ -9,9 +9,11 @@ LabelWise analyses packaged-food labels on Android. The current app is designed 
 - Label images, OCR text, nutrition values, ingredient alerts, and scores are processed on the device.
 - LabelWise does not request the Android internet permission and does not upload product photos or extracted label text.
 - LabelWise does not include advertising, analytics, tracking, or account SDKs.
-- Photos captured with the fallback camera are placed in the app's private cache and cleared when the analysis session ends or the app is closed.
+- Smart Scan inspects camera frames in memory for up to three seconds. It does not record audio or create a video.
+- Selected Smart Scan and fallback-camera photos are placed in the app's private cache and cleared when the analysis session ends or the app is closed.
 - Images selected from the gallery remain under the user's control. LabelWise receives temporary access only to the images the user selects.
 - Ingredient-alert preferences and custom alert terms are stored locally in the app's private preferences so they remain available between sessions.
+- When the user chooses **Save images and report**, Android asks the user to select a destination and LabelWise writes a PDF containing the two selected panel images and analysis details. LabelWise does not save a report unless the user requests it; exported PDFs remain under the user's control.
 
 LabelWise does not sell, share, or collect personal data in the current release.
 
@@ -32,4 +34,3 @@ Capture mode can use the Google Play services document scanner. OCR uses Google 
 ## Changes and contact
 
 Material changes to this policy will be published in this repository with a new effective date. Questions and privacy requests can be filed through the repository's [GitHub issue tracker](https://github.com/cvkulkarnidev/food_label_analyser/issues).
-

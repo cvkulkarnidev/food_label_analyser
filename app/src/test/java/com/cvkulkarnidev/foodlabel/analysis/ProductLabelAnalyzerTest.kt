@@ -12,6 +12,31 @@ import org.junit.Test
 
 class ProductLabelAnalyzerTest {
     @Test
+    fun `does not use per 100 ml header as an energy or carbohydrate value`() {
+        val report = ProductLabelAnalyzer.analyze(
+            """
+            Nutrition information
+            SERVING = 200 ml : 3.8
+            SERVINGS IN THIS PACK
+            Energy | Carbohydrate | per 100 ml | 14 g | 56 kcal | %RDA PER SERVE | 5.6%
+            Total sugars | 13.7 g
+            Added sugars | 13.7 g | 54.8%
+            Total fat | 0 g | 0%
+            Protein | 0 g
+            Sodium | 22.3 mg | 2.2%
+            Ingredients: Carbonated water, sugar, acidity regulator (330), stabilizers (414, 445), preservative (211), colour (110), flavours.
+            """.trimIndent(),
+            selectedCategory = ProductCategory.BEVERAGES_AND_JUICES,
+        )
+
+        assertEquals(NutritionBasis.PER_100_ML, report.nutritionBasis)
+        assertEquals(56.0, report.nutrition.energyKcal ?: -1.0, 0.001)
+        assertEquals(14.0, report.nutrition.carbohydrateG ?: -1.0, 0.001)
+        assertEquals(13.7, report.nutrition.totalSugarG ?: -1.0, 0.001)
+        assertEquals(22.3, report.nutrition.sodiumMg ?: -1.0, 0.001)
+    }
+
+    @Test
     fun `extracts an Indian nutrition panel and ingredients`() {
         val report = ProductLabelAnalyzer.analyze(
             """

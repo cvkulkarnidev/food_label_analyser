@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -59,6 +60,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
@@ -66,6 +69,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -90,6 +94,7 @@ import com.cvkulkarnidev.foodlabel.analysis.IngredientAlertPreferences
 import com.cvkulkarnidev.foodlabel.analysis.IngredientAlerts
 import com.cvkulkarnidev.foodlabel.analysis.ProductLabelAnalyzer
 import com.cvkulkarnidev.foodlabel.model.AnalysisReadiness
+import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.LabelReport
 import com.cvkulkarnidev.foodlabel.model.NutritionFacts
 import com.cvkulkarnidev.foodlabel.model.ProductCategory
@@ -104,6 +109,9 @@ import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import java.io.File
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,6 +143,10 @@ internal sealed interface ScreenState {
         val ingredientsUri: Uri,
         val category: ProductCategory,
     ) : ScreenState
+    data class SmartScan(
+        val input: ImageInput,
+        val slot: ImageSlot,
+    ) : ScreenState
     data class Result(
         val nutritionUri: Uri,
         val ingredientsUri: Uri,
@@ -144,11 +156,18 @@ internal sealed interface ScreenState {
 }
 
 internal enum class InputMode(val title: String, val action: String) {
-    CAPTURE("Capture both panels", "Capture"),
+    CAPTURE("Smart Scan both panels", "Scan"),
     UPLOAD("Upload both panels", "Choose"),
 }
 
 internal enum class ImageSlot { NUTRITION, INGREDIENTS }
+
+private data class ReportSaveRequest(
+    val nutritionUri: Uri,
+    val ingredientsUri: Uri,
+    val report: LabelReport,
+    val alertMatches: List<IngredientAlertMatch>,
+)
 
 @Composable
 private fun LabelWiseApp(createCameraUri: () -> Uri) {
@@ -156,6 +175,9 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     val appViewModel: LabelWiseViewModel = viewModel()
     val state = appViewModel.screenState
     val selectedCategory = appViewModel.selectedCategory
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+    var pendingSaveRequest by remember { mutableStateOf<ReportSaveRequest?>(null) }
     var ingredientAlertPreferences by remember(context) {
         mutableStateOf(loadIngredientAlertPreferences(context))
     }
@@ -168,6 +190,31 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val slot = appViewModel.pendingImageSlot
         if (uri != null && slot != null) appViewModel.setSelectedImage(slot, uri)
+    }
+    val saveReportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf"),
+    ) { destination ->
+        val request = pendingSaveRequest
+        pendingSaveRequest = null
+        if (destination != null && request != null) {
+            scope.launch {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
+                        LabelReportPdfExporter.write(
+                            context = context,
+                            destination = destination,
+                            nutritionImage = request.nutritionUri,
+                            ingredientsImage = request.ingredientsUri,
+                            report = request.report,
+                            alerts = request.alertMatches,
+                        )
+                    }
+                }
+                snackbarHostState.showSnackbar(
+                    if (result.isSuccess) "Report saved to your phone." else "The report could not be saved: ${result.exceptionOrNull()?.message ?: "unknown error"}",
+                )
+            }
+        }
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = appViewModel.pendingCameraUri
@@ -206,13 +253,9 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
         }
     }
 
-    fun requestImage(slot: ImageSlot) {
-        val current = appViewModel.screenState as? ScreenState.ImageInput ?: return
+    fun launchQuickCapture(slot: ImageSlot) {
+        if (appViewModel.screenState is ScreenState.SmartScan) appViewModel.cancelSmartScan()
         appViewModel.setPendingImage(slot)
-        if (current.mode == InputMode.UPLOAD) {
-            galleryLauncher.launch("image/*")
-            return
-        }
         val activity = context as? Activity
         if (activity == null) {
             launchSystemCamera()
@@ -225,9 +268,24 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
             .addOnFailureListener { launchSystemCamera() }
     }
 
-    BackHandler(enabled = state !is ScreenState.Home) { appViewModel.returnHome() }
+    fun requestImage(slot: ImageSlot) {
+        val current = appViewModel.screenState as? ScreenState.ImageInput ?: return
+        appViewModel.setPendingImage(slot)
+        if (current.mode == InputMode.UPLOAD) {
+            galleryLauncher.launch("image/*")
+            return
+        }
+        appViewModel.startSmartScan(slot)
+    }
 
-    Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
+    BackHandler(enabled = state !is ScreenState.Home) {
+        if (state is ScreenState.SmartScan) appViewModel.cancelSmartScan() else appViewModel.returnHome()
+    }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { padding ->
         when (val current = state) {
             ScreenState.Home -> HomeScreen(
                 modifier = Modifier.padding(padding),
@@ -256,13 +314,29 @@ private fun LabelWiseApp(createCameraUri: () -> Uri) {
                 category = current.category,
                 onBack = appViewModel::returnHome,
             )
+            is ScreenState.SmartScan -> SmartScanScreen(
+                modifier = Modifier.padding(padding),
+                panel = if (current.slot == ImageSlot.NUTRITION) LabelPanel.NUTRITION else LabelPanel.INGREDIENTS,
+                onComplete = { appViewModel.completeSmartScan(it) },
+                onCancel = appViewModel::cancelSmartScan,
+                onQuickCapture = { launchQuickCapture(current.slot) },
+            )
             is ScreenState.Result -> ResultScreen(
                 modifier = Modifier.padding(padding),
-                uri = current.nutritionUri,
+                nutritionUri = current.nutritionUri,
                 report = current.report,
                 ingredientAlertPreferences = ingredientAlertPreferences,
                 onBack = appViewModel::returnHome,
                 onReportReviewed = appViewModel::review,
+                onSave = {
+                    pendingSaveRequest = ReportSaveRequest(
+                        nutritionUri = current.nutritionUri,
+                        ingredientsUri = current.ingredientsUri,
+                        report = current.report,
+                        alertMatches = IngredientAlerts.findMatches(current.report.ingredients, ingredientAlertPreferences),
+                    )
+                    saveReportLauncher.launch(LabelReportPdfExporter.suggestedFileName(current.report))
+                },
                 onCapture = { appViewModel.beginInput(InputMode.CAPTURE) },
                 onUpload = { appViewModel.beginInput(InputMode.UPLOAD) },
             )
@@ -344,7 +418,7 @@ private fun HomeScreen(
             )
             ActionCard(
                 title = "Scan label",
-                subtitle = "Auto-crop and clean separate nutrition and ingredient photos",
+                subtitle = "Combine three clear frames for each panel and correct perspective",
                 icon = { Icon(Icons.Outlined.PhotoCamera, contentDescription = null) },
                 primary = true,
                 enabled = selectedCategory != null,
@@ -397,7 +471,7 @@ private fun HomeScreen(
             }
 
             Text(
-                "Tip: keep each panel flat and fill the frame. Capture mode can correct perspective, remove shadows and apply a readable filter.",
+                "Tip: fill the guide with the panel. Smart Scan checks focus, lighting and glare for three seconds, then combines the clearest readings.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
@@ -678,9 +752,13 @@ private fun ImageInputScreen(
                 shape = RoundedCornerShape(18.dp),
             ) {
                 Column(Modifier.padding(15.dp)) {
-                    Text("For better low-light OCR", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Text("For reliable OCR", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                     Text(
-                        "Use a lamp, avoid glare and hold still. Capture mode can crop, correct perspective and remove shadows; the app compares ML Kit with PaddleOCR, tests an enhanced image when needed, and re-reads uncertain nutrition rows.",
+                        if (state.mode == InputMode.CAPTURE) {
+                            "Tap a panel to run a 3-second Smart Scan. The app selects up to three clear frames, corrects perspective, compares their readings and uses PaddleOCR for verification."
+                        } else {
+                            "Use a close, sharp image with the complete panel visible. Uploaded images are deskewed when reliable geometry is detected and checked with ML Kit and PaddleOCR."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                     )
@@ -872,7 +950,7 @@ private fun ReadingScreen(
                 Text(category.label, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Dim images are enhanced, table rows are reconstructed by position, and uncertain rows are re-read at higher resolution on this device.",
+                    "Perspective is corrected first. Multiple frames are compared by nutrient row, and disputed text is verified on this device with PaddleOCR.",
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
                 )
@@ -884,11 +962,12 @@ private fun ReadingScreen(
 @Composable
 private fun ResultScreen(
     modifier: Modifier,
-    uri: Uri,
+    nutritionUri: Uri,
     report: LabelReport,
     ingredientAlertPreferences: IngredientAlertPreferences,
     onBack: () -> Unit,
     onReportReviewed: (ReviewedLabelInput) -> Unit,
+    onSave: () -> Unit,
     onCapture: () -> Unit,
     onUpload: () -> Unit,
 ) {
@@ -916,7 +995,7 @@ private fun ResultScreen(
                 IngredientAlerts.findMatches(report.ingredients, ingredientAlertPreferences)
             }
             Spacer(Modifier.height(2.dp))
-            ProductHeader(uri, report)
+            ProductHeader(nutritionUri, report)
             OcrQualityCard(report)
             ScoreCard(report)
             OutlinedButton(
@@ -932,6 +1011,17 @@ private fun ResultScreen(
                     if (report.wasUserReviewed) "Edit reviewed values" else "Review & correct extracted values",
                     fontWeight = FontWeight.Bold,
                 )
+            }
+            Button(
+                onClick = onSave,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Icon(Icons.Outlined.SaveAlt, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Save images and report (PDF)", fontWeight = FontWeight.Bold)
             }
             if (report.readiness != AnalysisReadiness.INSUFFICIENT) {
                 PeerComparisonCard(report)
@@ -1007,10 +1097,13 @@ private fun OcrQualityCard(report: LabelReport) {
                 Text(
                     "Overall ${(image.confidence * 100).roundToInt()}%" +
                         (image.recognitionConfidence?.let { " • Text ${(it * 100).roundToInt()}%" } ?: "") +
+                        (if (image.framesAnalyzed > 1) " • ${image.framesAnalyzed} frames" else " • Single image") +
+                        (image.consensusAgreement?.let { " • ${(it * 100).roundToInt()}% agreement" } ?: "") +
                         " • ${image.enginesCompared.joinToString(" + ")}" +
                         (if (image.paddleOcrContributed) " • Paddle result selected" else "") +
                         (image.paddleInferenceTimeMs?.let { " • Paddle ${it} ms" } ?: "") +
-                        if (image.enhancedImageUsed) " • Enhanced image used" else "",
+                        (if (image.perspectiveCorrected) " • Perspective corrected" else if (image.deskewed) " • Deskewed" else "") +
+                        (if (image.enhancedImageUsed) " • Enhanced image used" else ""),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 )
