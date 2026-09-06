@@ -14,6 +14,7 @@ import com.cvkulkarnidev.foodlabel.analysis.NutritionTextNormalizer
 import com.cvkulkarnidev.foodlabel.model.ImageOcrAssessment
 import com.cvkulkarnidev.foodlabel.model.LabelPanel
 import com.cvkulkarnidev.foodlabel.model.OcrQuality
+import com.paddle.ocr.util.DocumentRectifier
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -37,9 +38,33 @@ data class OcrReadResult(
 object OnDeviceOcr {
     private const val MAX_IMAGE_DIMENSION = 1_800
     private const val MAX_RETRIED_ROWS = 6
+    private const val MAX_CONSENSUS_FRAMES = 3
 
-    suspend fun read(context: Context, uri: Uri, panel: LabelPanel): OcrReadResult = withContext(Dispatchers.Default) {
-        val original = decodeBitmap(context, uri)
+    suspend fun read(context: Context, uri: Uri, panel: LabelPanel): OcrReadResult =
+        readFrame(context, uri, panel, includePaddle = true)
+
+    suspend fun read(context: Context, uris: List<Uri>, panel: LabelPanel): OcrReadResult =
+        withContext(Dispatchers.Default) {
+            val selectedUris = uris.distinct().take(MAX_CONSENSUS_FRAMES)
+            require(selectedUris.isNotEmpty()) { "No image was supplied for ${panel.label.lowercase()}." }
+            if (selectedUris.size == 1) return@withContext read(context, selectedUris.first(), panel)
+
+            val reads = selectedUris.mapIndexed { index, uri ->
+                readFrame(context, uri, panel, includePaddle = index == 0)
+            }
+            combineFrameReads(reads, panel)
+        }
+
+    private suspend fun readFrame(
+        context: Context,
+        uri: Uri,
+        panel: LabelPanel,
+        includePaddle: Boolean,
+    ): OcrReadResult = withContext(Dispatchers.Default) {
+        val decoded = decodeBitmap(context, uri)
+        val rectification = DocumentRectifier.rectify(context, decoded)
+        val original = rectification.bitmap
+        if (original !== decoded) decoded.recycle()
         val metrics = measure(original)
         val shouldEnhance = metrics.brightness < 115 || metrics.contrast < 38 || metrics.sharpness < 140
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -75,7 +100,7 @@ object OnDeviceOcr {
             var enginesCompared = listOf(OcrEngine.ML_KIT.label)
             var paddleContributed = false
             var paddleInferenceTimeMs: Long? = null
-            when (val paddle = PaddleOcrEngine.recognize(context, selectedBitmap)) {
+            when (val paddle = if (includePaddle) PaddleOcrEngine.recognize(context, selectedBitmap) else null) {
                 is PaddleReadOutcome.Success -> {
                     enginesCompared = listOf(OcrEngine.ML_KIT.label, OcrEngine.PADDLE.label)
                     paddleInferenceTimeMs = paddle.inferenceTimeMs
@@ -103,6 +128,7 @@ object OnDeviceOcr {
                             ).distinct(),
                     )
                 }
+                null -> Unit
             }
 
             OcrReadResult(
@@ -115,6 +141,8 @@ object OnDeviceOcr {
                     enginesCompared = enginesCompared,
                     paddleContributed = paddleContributed,
                     paddleInferenceTimeMs = paddleInferenceTimeMs,
+                    perspectiveCorrected = rectification.perspectiveCorrected,
+                    deskewed = rectification.deskewed,
                 ),
             )
         } finally {
@@ -123,6 +151,252 @@ object OnDeviceOcr {
             original.recycle()
         }
     }
+
+    private fun combineFrameReads(reads: List<OcrReadResult>, panel: LabelPanel): OcrReadResult {
+        val strongest = reads.maxBy { it.assessment.confidence }
+        val mergedText: String
+        val agreement: Double
+        val consensusWarnings = mutableListOf<String>()
+
+        if (panel == LabelPanel.NUTRITION) {
+            val consensus = nutritionConsensus(reads)
+            mergedText = consensus.text
+            agreement = consensus.agreement
+            if (agreement < 0.67) {
+                consensusWarnings += "The selected frames disagreed on one or more nutrition rows; review the highlighted values."
+            }
+        } else {
+            val texts = reads.map(OcrReadResult::text)
+            mergedText = ingredientConsensus(texts, reads.map { it.assessment.confidence })
+            agreement = averageTokenAgreement(texts)
+            if (agreement < 0.58) {
+                consensusWarnings += "The ingredient readings differed between frames; verify uncommon names and additive numbers."
+            }
+        }
+
+        val combinedConfidence = (
+            0.62 * reads.map { it.assessment.confidence }.average() +
+                0.38 * agreement
+            ).coerceIn(0.2, 0.98)
+        val warnings = (reads.flatMap { it.assessment.warnings } + consensusWarnings).distinct()
+        val quality = when {
+            combinedConfidence >= 0.80 && warnings.isEmpty() -> OcrQuality.GOOD
+            combinedConfidence >= 0.54 -> OcrQuality.REVIEW
+            else -> OcrQuality.POOR
+        }
+        val paddleTimes = reads.mapNotNull { it.assessment.paddleInferenceTimeMs }
+        return OcrReadResult(
+            text = mergedText,
+            assessment = strongest.assessment.copy(
+                quality = quality,
+                confidence = combinedConfidence,
+                recognitionConfidence = reads.mapNotNull { it.assessment.recognitionConfidence }
+                    .average()
+                    .takeIf { !it.isNaN() },
+                warnings = warnings,
+                corrections = (
+                    reads.flatMap { it.assessment.corrections } +
+                        "Combined ${reads.size} independently captured frames before extracting the label."
+                    ).distinct(),
+                enginesCompared = reads.flatMap { it.assessment.enginesCompared }.distinct(),
+                paddleOcrContributed = reads.any { it.assessment.paddleOcrContributed },
+                paddleInferenceTimeMs = paddleTimes.sum().takeIf { paddleTimes.isNotEmpty() },
+                framesAnalyzed = reads.size,
+                consensusAgreement = agreement,
+                perspectiveCorrected = reads.any { it.assessment.perspectiveCorrected },
+                deskewed = reads.any { it.assessment.deskewed },
+            ),
+        )
+    }
+
+    private fun nutritionConsensus(reads: List<OcrReadResult>): TextConsensus {
+        val strongest = reads.maxBy { it.assessment.confidence }
+        val keyedRows = reads.mapIndexed { frameIndex, read ->
+            read.text.lineSequence()
+                .map { it.replace(Regex("\\s+"), " ").trim() }
+                .filter(String::isNotBlank)
+                .mapNotNull { line ->
+                    nutritionRowKey(line)?.let { key ->
+                        RowVote(key, line, rowSignature(key, line), frameIndex, read.assessment.confidence)
+                    }
+                }
+                .distinctBy { it.key }
+                .toList()
+        }
+        val bestNonRows = strongest.text.lineSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() && nutritionRowKey(it) == null }
+            .take(18)
+            .toList()
+        val selected = mutableListOf<String>()
+        val agreements = mutableListOf<Double>()
+        NUTRITION_ROW_ORDER.forEach { key ->
+            val candidates = keyedRows.flatten().filter { it.key == key }
+            if (candidates.isEmpty()) return@forEach
+            val winning = candidates.groupBy(RowVote::signature)
+                .values
+                .maxWithOrNull(
+                    compareBy<List<RowVote>>(
+                        { group -> group.map(RowVote::frameIndex).distinct().size },
+                        { group -> group.sumOf(RowVote::sourceConfidence) },
+                        { group -> group.maxOf { rowEvidenceText(it.text) } },
+                    ),
+                ) ?: return@forEach
+            selected += winning.maxWith(
+                compareBy<RowVote>({ rowEvidenceText(it.text) }, { it.sourceConfidence }),
+            ).text
+            agreements += winning.map(RowVote::frameIndex).distinct().size.toDouble() / reads.size
+        }
+        val text = (bestNonRows + selected).distinct().joinToString("\n")
+            .ifBlank { strongest.text }
+        return TextConsensus(
+            text = text,
+            agreement = agreements.average().takeIf { !it.isNaN() } ?: 0.35,
+        )
+    }
+
+    private fun rowSignature(key: String, text: String): String {
+        if (key == "basis") {
+            val normalized = text.lowercase().replace(" ", "")
+            return when {
+                "100ml" in normalized -> "per100ml"
+                "100g" in normalized -> "per100g"
+                "serv" in normalized -> "perserving"
+                "pack" in normalized -> "perpack"
+                else -> normalized.filter(Char::isLetterOrDigit)
+            }
+        }
+        return measurementSignature(text).joinToString("|")
+            .ifBlank { text.lowercase().filter(Char::isLetterOrDigit) }
+    }
+
+    private fun rowEvidenceText(text: String): Int {
+        var score = text.count(Char::isLetterOrDigit)
+        if (isNutritionRow(text)) score += 45
+        score += measurementSignature(text).size * 35
+        if (Regex("(?i)(?:m9|rn9|\\d\\s+9\\b|\\(9\\))").containsMatchIn(text)) score -= 50
+        if (nutritionLabelCount(text) > 1) score -= 25
+        return score
+    }
+
+    /**
+     * ROVER-style token voting: use the strongest reading as the spine, align the other
+     * readings to it, and only replace a token when two independent frames support it.
+     */
+    private fun ingredientConsensus(texts: List<String>, confidences: List<Double>): String {
+        if (texts.size == 1) return texts.first()
+        val baseIndex = confidences.indices.maxBy { confidences[it] }
+        val baseTokens = tokenize(texts[baseIndex])
+        if (baseTokens.isEmpty()) return texts[baseIndex]
+
+        val votes = baseTokens.indices.map { index ->
+            linkedMapOf(normalizeToken(baseTokens[index]) to TokenVote(baseTokens[index], confidences[baseIndex], 1))
+        }
+        texts.indices.filter { it != baseIndex }.forEach { frameIndex ->
+            alignToBase(baseTokens, tokenize(texts[frameIndex])).forEach { (basePosition, token) ->
+                val key = normalizeToken(token)
+                val existing = votes[basePosition][key]
+                votes[basePosition][key] = if (existing == null) {
+                    TokenVote(token, confidences[frameIndex], 1)
+                } else {
+                    existing.copy(weight = existing.weight + confidences[frameIndex], sources = existing.sources + 1)
+                }
+            }
+        }
+
+        val output = baseTokens.indices.map { index ->
+            val base = votes[index].getValue(normalizeToken(baseTokens[index]))
+            val winner = votes[index].values.maxWith(
+                compareBy<TokenVote>({ it.sources }, { it.weight }),
+            )
+            if (winner.sources >= 2 || base.sources < 2) winner.token else base.token
+        }.joinToString(" ")
+        return output
+            .replace(Regex("\\s+([,.;:%)])")) { it.groupValues[1] }
+            .replace(Regex("([(])\\s+")) { it.groupValues[1] }
+            .replace(Regex("\\s*([/-])\\s*")) { it.groupValues[1] }
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun tokenize(text: String): List<String> =
+        Regex("[\\p{L}\\p{N}]+(?:[.,][\\p{L}\\p{N}]+)*|[%&()+:;,./-]")
+            .findAll(text)
+            .map { it.value }
+            .toList()
+
+    private fun normalizeToken(token: String): String = token.lowercase()
+
+    private fun alignToBase(base: List<String>, candidate: List<String>): Map<Int, String> {
+        if (candidate.isEmpty()) return emptyMap()
+        val rows = base.size + 1
+        val columns = candidate.size + 1
+        val costs = Array(rows) { IntArray(columns) }
+        for (row in 0 until rows) costs[row][0] = row
+        for (column in 0 until columns) costs[0][column] = column
+        for (row in 1 until rows) {
+            for (column in 1 until columns) {
+                val substitution = if (
+                    normalizeToken(base[row - 1]) == normalizeToken(candidate[column - 1])
+                ) 0 else 1
+                costs[row][column] = minOf(
+                    costs[row - 1][column] + 1,
+                    costs[row][column - 1] + 1,
+                    costs[row - 1][column - 1] + substitution,
+                )
+            }
+        }
+
+        val aligned = mutableMapOf<Int, String>()
+        var row = base.size
+        var column = candidate.size
+        while (row > 0 || column > 0) {
+            val canDiagonal = row > 0 && column > 0
+            val substitution = if (canDiagonal && normalizeToken(base[row - 1]) == normalizeToken(candidate[column - 1])) 0 else 1
+            when {
+                canDiagonal && costs[row][column] == costs[row - 1][column - 1] + substitution -> {
+                    aligned[row - 1] = candidate[column - 1]
+                    row--
+                    column--
+                }
+                row > 0 && costs[row][column] == costs[row - 1][column] + 1 -> row--
+                else -> column--
+            }
+        }
+        return aligned
+    }
+
+    private fun averageTokenAgreement(texts: List<String>): Double {
+        if (texts.size < 2) return 1.0
+        val tokenSets = texts.map { text -> tokenize(text).map(::normalizeToken).toSet() }
+        val scores = mutableListOf<Double>()
+        for (first in tokenSets.indices) {
+            for (second in first + 1 until tokenSets.size) {
+                val union = tokenSets[first] union tokenSets[second]
+                if (union.isNotEmpty()) {
+                    scores += (tokenSets[first] intersect tokenSets[second]).size.toDouble() / union.size
+                }
+            }
+        }
+        return scores.average().takeIf { !it.isNaN() } ?: 0.35
+    }
+
+    private data class TextConsensus(val text: String, val agreement: Double)
+
+    private data class RowVote(
+        val key: String,
+        val text: String,
+        val signature: String,
+        val frameIndex: Int,
+        val sourceConfidence: Double,
+    )
+
+    private data class TokenVote(val token: String, val weight: Double, val sources: Int)
+
+    private val NUTRITION_ROW_ORDER = listOf(
+        "basis", "serving", "energy", "protein", "carbohydrate", "total sugar",
+        "added sugar", "sugar", "fibre", "fat", "saturated fat", "trans fat", "sodium", "salt",
+    )
 
     private fun decodeBitmap(context: Context, uri: Uri): Bitmap {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -654,6 +928,8 @@ object OnDeviceOcr {
         enginesCompared: List<String>,
         paddleContributed: Boolean,
         paddleInferenceTimeMs: Long?,
+        perspectiveCorrected: Boolean,
+        deskewed: Boolean,
     ): ImageOcrAssessment {
         val text = rendered.text
         val warnings = rendered.warnings.toMutableList()
@@ -712,6 +988,8 @@ object OnDeviceOcr {
             enginesCompared = enginesCompared,
             paddleOcrContributed = paddleContributed,
             paddleInferenceTimeMs = paddleInferenceTimeMs,
+            perspectiveCorrected = perspectiveCorrected,
+            deskewed = deskewed,
         )
     }
 

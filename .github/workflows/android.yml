@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   pull_request:
   workflow_dispatch:
 
@@ -63,7 +63,7 @@ jobs:
       - name: Upload test APK
         uses: actions/upload-artifact@v4
         with:
-          name: labelwise-v1.0.0-test-apk
+          name: labelwise-v1.1.0-test-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
@@ -71,7 +71,7 @@ jobs:
       - name: Upload release candidate bundle
         uses: actions/upload-artifact@v4
         with:
-          name: labelwise-v1.0.0-unsigned-aab
+          name: labelwise-v1.1.0-unsigned-aab
           path: app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
           retention-days: 30
@@ -84,4 +84,3 @@ jobs:
           path: app/build/reports/lint-results-debug.html
           if-no-files-found: ignore
           retention-days: 30
-
