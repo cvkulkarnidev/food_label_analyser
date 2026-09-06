@@ -25,8 +25,8 @@ android {
         applicationId = "com.cvkulkarnidev.foodlabel"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.1.0"
+        versionCode = 11
+        versionName = "1.2.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -105,4 +105,5 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling:1.10.4")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }

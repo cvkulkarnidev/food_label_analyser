@@ -35,6 +35,7 @@ Verify the signer and archive before upload. Enrol the app in Play App Signing a
 - Test Android 8 through the current target version on small and large screens, light/dark themes, 200% font size, rotation, low memory, airplane mode, and a device without the document-scanner module preinstalled.
 - Test camera cancellation, gallery cancellation, corrupted images, low storage, severe blur, glare, low light, long ingredient lists, decimal commas, per-serving labels, per-pack labels, and unknown bases.
 - Confirm that leaving analysis cancels OCR and clears only LabelWise temporary camera files.
+- Test named history save, image persistence after process restart, reopen, reviewed-value persistence, confirmed deletion, corrupted history metadata, and low-storage failure messaging.
 - Confirm that a poor or incomplete scan never shows a category percentile or numeric health score until the user supplies comparable reviewed data.
 - Review lint, unit-test, Play pre-launch, Android vitals, and automated device-test reports.
 - Use staged rollout with crash/ANR monitoring and a documented rollback owner.
@@ -46,4 +47,3 @@ Verify the signer and archive before upload. Enrol the app in Play App Signing a
 - Freeze and document the benchmark-data snapshot used for each app version.
 - Have nutrition/public-health experts review scoring thresholds and consumer-facing wording before making stronger health claims.
 - Add a user-visible scoring-method/version identifier before changing score weights, so scores remain reproducible.
-

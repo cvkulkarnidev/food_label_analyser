@@ -11,15 +11,16 @@ LabelWise analyses packaged-food labels on Android. The current app is designed 
 - LabelWise does not include advertising, analytics, tracking, or account SDKs.
 - Smart Scan inspects camera frames in memory for up to three seconds. It does not record audio or create a video.
 - Selected Smart Scan and fallback-camera photos are placed in the app's private cache and cleared when the analysis session ends or the app is closed.
-- Images selected from the gallery remain under the user's control. LabelWise receives temporary access only to the images the user selects.
+- Images selected from the gallery remain under the user's control. LabelWise receives access only to the images the user selects.
 - Ingredient-alert preferences and custom alert terms are stored locally in the app's private preferences so they remain available between sessions.
-- When the user chooses **Save images and report**, Android asks the user to select a destination and LabelWise writes a PDF containing the two selected panel images and analysis details. LabelWise does not save a report unless the user requests it; exported PDFs remain under the user's control.
+- When the user chooses **Save to history**, LabelWise stores optimized copies of the two selected panel images, the user-provided history name, and the complete analysis in the app's private on-device storage. Saved entries remain until the user deletes them or uninstalls the app.
+- When the user chooses **Export PDF to phone**, Android asks the user to select a destination and LabelWise writes a PDF containing the two panel images and analysis details. Exported PDFs remain under the user's control.
 
 LabelWise does not sell, share, or collect personal data in the current release.
 
 ## Deleting data
 
-Users can remove custom alert terms or disable preset alerts in the app. Uninstalling LabelWise removes its private preferences and cache. Gallery originals are not modified or deleted.
+Users can remove custom alert terms or disable preset alerts in the app. Individual saved analyses can be deleted from the History screen. Clearing app storage or uninstalling LabelWise removes its private preferences, cache, and saved history. Gallery originals and exported PDFs are not modified or deleted.
 
 ## Health and safety limitations
 

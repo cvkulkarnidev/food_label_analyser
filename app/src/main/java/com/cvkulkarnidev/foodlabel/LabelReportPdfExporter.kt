@@ -25,8 +25,8 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 internal object LabelReportPdfExporter {
-    fun suggestedFileName(report: LabelReport): String {
-        val product = report.productName
+    fun suggestedFileName(report: LabelReport, instanceName: String? = null): String {
+        val product = instanceName.orEmpty().ifBlank { report.productName }
             .replace(Regex("[^A-Za-z0-9]+"), "_")
             .trim('_')
             .take(36)
@@ -42,6 +42,7 @@ internal object LabelReportPdfExporter {
         ingredientsImage: Uri,
         report: LabelReport,
         alerts: List<IngredientAlertMatch>,
+        instanceName: String? = null,
     ) {
         val nutritionBitmap = decodeForReport(context, nutritionImage)
         val ingredientsBitmap = decodeForReport(context, ingredientsImage)
@@ -55,7 +56,11 @@ internal object LabelReportPdfExporter {
                 Color.DKGRAY,
             )
             writer.space(8f)
-            writer.heading(report.productName, 18f, Color.rgb(24, 38, 32))
+            val displayName = instanceName.orEmpty().ifBlank { report.productName }
+            writer.heading(displayName, 18f, Color.rgb(24, 38, 32))
+            if (!displayName.equals(report.productName, ignoreCase = true)) {
+                writer.keyValue("Detected product", report.productName)
+            }
             writer.keyValue("Category", report.category.label)
             writer.keyValue(
                 "Health score",
